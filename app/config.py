@@ -1,54 +1,54 @@
 """
-Central application configuration.
+Central configuration loader.
 
-Loads environment variables from the .env file
-and exposes strongly typed runtime settings.
+Reads all values from environment variables (.env).
 """
-
-from dotenv import load_dotenv
-from pydantic import BaseModel
 
 import os
 
 
-# Load .env file
-load_dotenv()
+class Settings:
+    def __init__(self) -> None:
+        # Paperless
+        self.paperless_url = os.getenv(
+            "PAPERLESS_URL",
+            "http://localhost:8000",
+        )
+
+        self.paperless_token = os.getenv(
+            "PAPERLESS_TOKEN",
+            "",
+        )
+
+        # Ollama
+        self.ollama_model = os.getenv(
+            "OLLAMA_MODEL",
+            "llama3",
+        )
+
+        self.ollama_url = os.getenv(
+            "OLLAMA_URL",
+            "http://host.docker.internal:11434",
+        )
+
+        # Paths
+        self.export_path = os.getenv(
+            "EXPORT_PATH",
+            "/exports",
+        )
+
+        self.db_path = os.getenv(
+            "DB_PATH",
+            "/data",
+        )
+
+        # Worker
+        self.poll_interval = int(
+            os.getenv(
+                "POLL_INTERVAL",
+                "10",
+            )
+        )
 
 
-class Settings(BaseModel):
-    """
-    Strongly typed application settings.
-    """
-
-    paperless_url: str = os.getenv(
-        "PAPERLESS_URL",
-        "",
-    )
-
-    paperless_token: str = os.getenv(
-        "PAPERLESS_TOKEN",
-        "",
-    )
-
-    ollama_model: str = os.getenv(
-        "OLLAMA_MODEL",
-        "qwen2.5:7b",
-    )
-
-    ollama_url: str = os.getenv(
-        "OLLAMA_URL",
-        "http://host.docker.internal:11434",
-    )
-
-    export_path: str = os.getenv(
-        "EXPORT_PATH",
-        "/exports",
-    )
-
-    poll_interval: int = int(
-        os.getenv("POLL_INTERVAL", "30")
-    )
-
-
-# Global application settings instance
 settings = Settings()
