@@ -1,25 +1,36 @@
 from pathlib import Path
-import shutil
 
 from app.config import settings
 
 
 class Exporter:
-    def export(
+    def export_path(
         self,
-        source_file: str,
         document_type: str,
         correspondent: str,
         filename: str,
-    ) -> None:
-        target_dir = (
-            Path(settings.export_path)
-            / document_type
-            / correspondent
+    ) -> Path:
+        safe_document_type = (
+            document_type.replace("/", "_")
         )
 
-        target_dir.mkdir(parents=True, exist_ok=True)
+        safe_correspondent = (
+            correspondent.replace("/", "_")
+        )
 
-        target_file = target_dir / filename
+        safe_filename = (
+            filename.replace("/", "_")
+        )
 
-        shutil.copy2(source_file, target_file)
+        target_dir = (
+            Path(settings.export_path)
+            / safe_document_type
+            / safe_correspondent
+        )
+
+        target_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        return target_dir / safe_filename

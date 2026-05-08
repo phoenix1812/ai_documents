@@ -52,3 +52,23 @@ class PaperlessClient:
         )
 
         response.raise_for_status()
+
+    def download_document(
+        self,
+        document_id: int,
+        target_path: str,
+    ) -> None:
+        response = requests.get(
+            (
+                f"{self.base_url}"
+                f"/api/documents/"
+                f"{document_id}/download/"
+            ),
+            headers=self.headers,
+            timeout=60,
+        )
+
+        response.raise_for_status()
+
+        with open(target_path, "wb") as file:
+            file.write(response.content)
