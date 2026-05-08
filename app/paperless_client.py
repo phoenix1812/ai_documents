@@ -85,14 +85,15 @@ class PaperlessClient:
         )
 
         response.raise_for_status()
+ 
 
     def download_document(
         self,
         document_id: int,
-        target_path: str,
-    ) -> None:
+    ) -> bytes:
         """
-        Download original document PDF.
+        Download document as raw bytes.
+        Needed for hashing before export.
         """
 
         response = requests.get(
@@ -107,5 +108,4 @@ class PaperlessClient:
 
         response.raise_for_status()
 
-        with open(target_path, "wb") as file:
-            file.write(response.content)
+        return response.content
