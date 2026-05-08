@@ -1,0 +1,8 @@
+services:
+  ai-worker:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./exports:/exports

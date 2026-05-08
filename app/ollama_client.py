@@ -1,0 +1,63 @@
+import json
+import logging
+
+import ollama
+from tenacity import retry, stop_after_attempt, wait_fixed
+
+from app.config import settings
+from app.models import ClassificationResult
+from app.prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
+
+logger = logging.getLogger(__name__)
+
+
+class OllamaClient:
+    def __init__(self) -> None:
+        self.client = ollama.Client(
+            host=settings.ollama_url
+        )
+
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_fixed(2),
+        reraise=True,
+    )
+    def classify(self, content: str) -> ClassificationResult:
+        prompt = USER_PROMPT_TEMPLATE.format(
+            content=content[:12000]
+        )
+
+        logger.info("Sending document to Ollama")
+
+        response = self.client.chat(
+            model=settings.ollama_model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": SYSTEM_PROMPT,
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            format="json",
+        )
+
+        raw = response["message"]["content"]
+
+        logger.info("RAW OLLAMA OUTPUT: %s", raw)
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.error("Invalid JSON from Ollama: %s", raw)
+            raise
+
+        return ClassificationResult(
+            document_type=data.get("document_type", "Sonstiges"),
+            correspondent=data.get("correspondent", "Unbekannt"),
+            title=data.get("title", "Unbenannt"),
+            tags=data.get("tags", []),
+            confidence=data.get("confidence", 0.5),
+        )
