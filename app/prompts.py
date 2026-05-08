@@ -1,3 +1,11 @@
+"""
+Prompt templates used for Ollama classification.
+
+Prompts are intentionally strict to improve
+JSON consistency and reduce hallucinations.
+"""
+
+
 SYSTEM_PROMPT = """
 Du bist ein hochpräzises Dokumentenklassifikationssystem.
 
@@ -17,6 +25,7 @@ Regeln:
 - KEIN Markdown
 - KEINE Erklärungen
 """
+
 
 USER_PROMPT_TEMPLATE = """
 Analysiere dieses Dokument:

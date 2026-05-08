@@ -1,12 +1,24 @@
+"""
+Core document classification pipeline.
+
+Coordinates:
+- OCR content loading
+- Ollama classification
+- Paperless metadata updates
+- PDF export
+"""
+
 import logging
 
 from app.exporter import Exporter
 from app.ollama_client import OllamaClient
 from app.paperless_client import PaperlessClient
 
+
 logger = logging.getLogger(__name__)
 
 
+# Maps LLM labels to Paperless document type IDs
 DOCUMENT_TYPE_MAPPING = {
     "Rechnung": 1,
     "Vertrag": 2,
@@ -18,6 +30,10 @@ DOCUMENT_TYPE_MAPPING = {
 
 
 class DocumentClassifier:
+    """
+    Main document processing pipeline.
+    """
+
     def __init__(self) -> None:
         self.paperless = PaperlessClient()
 
@@ -29,11 +45,20 @@ class DocumentClassifier:
         self,
         document_id: int,
     ) -> None:
+        """
+        Process a single Paperless document.
+        """
+
+        # Load document metadata
         document = self.paperless.get_document(
             document_id
         )
 
-        content = document.get("content", "")
+        # OCR text content
+        content = document.get(
+            "content",
+            "",
+        )
 
         if not content:
             logger.warning(
@@ -42,6 +67,7 @@ class DocumentClassifier:
             )
             return
 
+        # Run LLM classification
         result = self.ollama.classify(content)
 
         logger.info(
@@ -49,11 +75,14 @@ class DocumentClassifier:
             result,
         )
 
+        # Update Paperless metadata
         payload = {
             "title": result.title,
-            "document_type": DOCUMENT_TYPE_MAPPING.get(
-                result.document_type,
-                6,
+            "document_type": (
+                DOCUMENT_TYPE_MAPPING.get(
+                    result.document_type,
+                    6,
+                )
             ),
         }
 
@@ -62,14 +91,16 @@ class DocumentClassifier:
             payload,
         )
 
-        target_file = (
-            self.exporter.export_path(
-                document_type=result.document_type,
-                correspondent=result.correspondent,
-                filename=(
-                    f"{result.title}.pdf"
-                ),
-            )
+        # Build export path
+        target_filename = self.exporter.build_filename(
+            title=result.title,
+            tags=result.tags,
+        )
+
+        target_file = self.exporter.export_path(
+            document_type=result.document_type,
+            correspondent=result.correspondent,
+            filename=target_filename,
         )
 
         logger.info(
@@ -77,6 +108,7 @@ class DocumentClassifier:
             target_file,
         )
 
+        # Download PDF from Paperless
         self.paperless.download_document(
             document_id=document_id,
             target_path=str(target_file),
