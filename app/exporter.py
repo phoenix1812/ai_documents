@@ -1,11 +1,13 @@
 """
 Document export utilities.
 
-Creates structured export directories and
-safe, collision-resistant filenames.
+Creates structured export directories and safe, collision-resistant filenames.
+Review documents are exported into a dedicated _REVIEW folder instead of being
+mixed into the final archive.
 """
 
 import re
+from datetime import datetime
 from pathlib import Path
 
 from app.config import settings
@@ -36,11 +38,7 @@ class Exporter:
         tags: list[str],
     ) -> str:
         """
-        Build filename from title + tags.
-
-        Rules:
-        - no spaces
-        - safe filesystem characters only
+        Build filename from title + tags for valid, auto-exportable documents.
         """
 
         safe_title = cls.sanitize(title)
@@ -59,6 +57,29 @@ class Exporter:
 
         return f"{safe_title}.pdf"
 
+    @classmethod
+    def build_review_filename(
+        cls,
+        document_id: int,
+        file_hash: str,
+        reasons: list[str],
+    ) -> str:
+        """
+        Build a stable review filename that never depends on bad LLM output.
+
+        Example:
+        2026-05-11_review_doc-123_placeholder_title_low_confidence_a1b2c3d4.pdf
+        """
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        reason_part = cls.sanitize("_".join(reasons[:3]) or "needs_review")
+        short_hash = cls.sanitize(file_hash[:8] or "nohash")
+
+        return (
+            f"{today}_review_doc-{document_id}_"
+            f"{reason_part}_{short_hash}.pdf"
+        )
+
     def export_path(
         self,
         document_type: str,
@@ -66,7 +87,7 @@ class Exporter:
         filename: str,
     ) -> Path:
         """
-        Build final export path.
+        Build final export path for valid documents.
         """
 
         target_dir = (
@@ -80,6 +101,21 @@ class Exporter:
             exist_ok=True,
         )
 
+        return target_dir / self.sanitize(filename)
+
+    def review_export_path(
+        self,
+        filename: str,
+    ) -> Path:
+        """
+        Build export path for documents that require manual review.
+        """
+
+        target_dir = Path(settings.export_path) / "_REVIEW"
+        target_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
         return target_dir / self.sanitize(filename)
 
     @staticmethod
