@@ -42,14 +42,6 @@ class Settings:
             "/data",
         )
 
-        # Worker
-        self.poll_interval = int(
-            os.getenv(
-                "POLL_INTERVAL",
-                "10",
-            )
-        )
-
         # Classification
         self.confidence_threshold = float(
             os.getenv(
@@ -58,10 +50,25 @@ class Settings:
             )
         )
 
+        self.min_title_length = int(
+            os.getenv(
+                "MIN_TITLE_LENGTH",
+                "8",
+            )
+        )
+
         # Startup dependency check
         self.paperless_healthcheck_url = os.getenv(
             "PAPERLESS_HEALTHCHECK_URL",
             self.paperless_url,
+        )
+
+        # Event-driven trigger server
+        self.trigger_port = int(
+            os.getenv(
+                "TRIGGER_PORT",
+                "8080",
+            )
         )
 
 

@@ -2,9 +2,10 @@
 Document processing pipeline:
 - Paperless ingestion
 - OCR text classification via Ollama
-- Duplicate detection via SQLite
-- Export with structured filenames
-- Basic Paperless metadata update
+- validation of LLM output
+- duplicate detection via SQLite
+- final export or review export
+- basic Paperless metadata update
 """
 
 import json
@@ -24,6 +25,7 @@ from app.exporter import Exporter
 from app.hash_store import sha256
 from app.ollama_client import OllamaClient
 from app.paperless_client import PaperlessClient
+from app.validator import validate_classification
 
 
 logger = logging.getLogger(__name__)
@@ -38,12 +40,93 @@ class DocumentClassifier:
         # SQLite inside container volume
         self.db = Database(settings.db_path)
 
+    def _write_bytes(
+        self,
+        target_file,
+        file_bytes: bytes,
+    ) -> None:
+        with open(target_file, "wb") as f:
+            f.write(file_bytes)
+
+    def _send_to_review(
+        self,
+        document_id: int,
+        file_hash: str,
+        file_bytes: bytes,
+        title: str,
+        correspondent: str,
+        document_type: str,
+        reasons: list[str],
+    ) -> str:
+        """
+        Export document to _REVIEW and persist NEEDS_REVIEW state.
+        """
+
+        filename = self.exporter.build_review_filename(
+            document_id=document_id,
+            file_hash=file_hash,
+            reasons=reasons,
+        )
+        target_file = self.exporter.review_export_path(filename)
+        target_file = self.exporter.unique_path(target_file)
+
+        try:
+            self._write_bytes(target_file, file_bytes)
+        except OSError as exc:
+            self.db.insert_document(
+                paperless_id=document_id,
+                file_hash=file_hash,
+                title=title,
+                correspondent=correspondent,
+                document_type=document_type,
+                export_path=str(target_file),
+                status=STATUS_FAILED_EXPORT,
+                error_message=str(exc),
+            )
+            return STATUS_FAILED_EXPORT
+
+        reason_text = ", ".join(reasons)
+
+        self.db.insert_document(
+            paperless_id=document_id,
+            file_hash=file_hash,
+            title=title,
+            correspondent=correspondent,
+            document_type=document_type,
+            export_path=str(target_file),
+            status=STATUS_NEEDS_REVIEW,
+            error_message=reason_text,
+        )
+
+        try:
+            self.paperless.update_document(
+                document_id=document_id,
+                payload={
+                    "title": f"[Review] {title or 'Unklassifiziertes Dokument'}",
+                },
+            )
+        except requests.RequestException:
+            logger.exception(
+                "Paperless review metadata update failed for document %s.",
+                document_id,
+            )
+
+        logger.warning(
+            "Document %s moved to review: %s -> %s",
+            document_id,
+            reason_text,
+            target_file,
+        )
+
+        return STATUS_NEEDS_REVIEW
+
     def process_document(self, document_id: int) -> str:
         """
         Process one Paperless document.
 
         Deduplication is based on file hash.
         Processing state is persisted in SQLite.
+        Documents with unsafe classification results are sent to _REVIEW.
         """
 
         file_hash = ""
@@ -83,6 +166,8 @@ class DocumentClassifier:
                     "No OCR content: %s",
                     document_id,
                 )
+                # No OCR can not be classified safely. Keep this as OCR failure,
+                # not review, because manual review can not fix missing OCR metadata.
                 self.db.insert_document(
                     paperless_id=document_id,
                     file_hash=file_hash,
@@ -111,35 +196,18 @@ class DocumentClassifier:
                 )
                 return STATUS_FAILED_LLM
 
-            # 5. Confidence gate
-            if result.confidence < settings.confidence_threshold:
-                logger.warning(
-                    "Low confidence for document %s: %s",
-                    document_id,
-                    result.confidence,
-                )
-                self.db.insert_document(
-                    paperless_id=document_id,
+            # 5. Validate classification before final export
+            validation = validate_classification(result)
+            if not validation.valid:
+                return self._send_to_review(
+                    document_id=document_id,
                     file_hash=file_hash,
+                    file_bytes=file_bytes,
                     title=result.title,
                     correspondent=result.correspondent,
                     document_type=result.document_type,
-                    export_path="",
-                    status=STATUS_NEEDS_REVIEW,
-                    error_message=(
-                        f"Low confidence: {result.confidence}; "
-                        f"threshold: {settings.confidence_threshold}"
-                    ),
+                    reasons=validation.reasons,
                 )
-
-                # Minimal Paperless visibility for manual review.
-                self.paperless.update_document(
-                    document_id=document_id,
-                    payload={
-                        "title": f"[Review] {result.title}",
-                    },
-                )
-                return STATUS_NEEDS_REVIEW
 
             # 6. Build safe filename and final export path
             filename = self.exporter.build_filename(
@@ -156,8 +224,7 @@ class DocumentClassifier:
 
             # 7. Write file
             try:
-                with open(target_file, "wb") as f:
-                    f.write(file_bytes)
+                self._write_bytes(target_file, file_bytes)
             except OSError as exc:
                 self.db.insert_document(
                     paperless_id=document_id,

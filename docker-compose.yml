@@ -45,6 +45,7 @@ services:
     depends_on:
       - redis
       - db
+      - ai-worker
 
     ports:
       - "8000:8000"
@@ -70,14 +71,19 @@ services:
       PAPERLESS_OCR_DESKEW: true
       PAPERLESS_OCR_CLEAN: clean
 
+      # Event-driven AI trigger after Paperless has consumed a document.
+      PAPERLESS_POST_CONSUME_SCRIPT: /usr/src/paperless/scripts/post-consume-ai-worker.sh
+      AI_WORKER_TRIGGER_URL: http://ai-worker:8080/process
+
     volumes:
       - ./data/data:/usr/src/paperless/data
       - ./media:/usr/src/paperless/media
       - ./consume:/usr/src/paperless/consume
       - ./export:/usr/src/paperless/export
+      - ./scripts:/usr/src/paperless/scripts:ro
 
   # -------------------------
-  # AI WORKER
+  # AI WORKER TRIGGER SERVER
   # -------------------------
   ai-worker:
     build: .
@@ -86,14 +92,14 @@ services:
 
     depends_on:
       - ollama
-      - paperless
 
     env_file:
       - .env
 
     environment:
-      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_URL: http://ollama:11434
       PAPERLESS_URL: http://paperless:8000
+      TRIGGER_PORT: 8080
 
     volumes:
       - ./export:/exports
