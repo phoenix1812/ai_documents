@@ -225,3 +225,4 @@ ollama/
 .DS_Store
 export/
 data/documents.db
+consume/
