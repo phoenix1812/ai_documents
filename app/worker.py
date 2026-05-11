@@ -7,6 +7,7 @@ and processes unhandled entries.
 
 import logging
 import time
+import requests
 
 from app.classifier import DocumentClassifier
 from app.config import settings
@@ -23,9 +24,27 @@ class Worker:
     def __init__(self) -> None:
         self.classifier = DocumentClassifier()
 
-        # In-memory tracking
-        # Will be replaced by SQLite in Phase 2
+
+
         self.processed_documents = set()
+
+    def is_paperless_available(self):
+        try:
+            response = requests.get(
+                "http://paperless:8000",
+                timeout=10,
+            )
+            return response.status_code == 200
+        except requests.RequestException:
+            return False
+
+    def wait_for_paperless(self):
+        while not self.is_paperless_available():
+            logger.info(
+                "Paperless ist nicht verfügbar. Warte..."
+            )
+
+            time.sleep(5)
 
     def run(self) -> None:
         """
@@ -34,46 +53,51 @@ class Worker:
 
         logger.info("Worker started")
 
+        # Wait for dependencies
+        self.wait_for_paperless()
+
         while True:
             try:
-                # Load all documents
-                documents = (
-                    self.classifier
-                    .paperless
-                    .get_documents()
+                documents = self.classifier.paperless.get_documents()
+
+                logger.info(
+                    f"Found {len(documents)} documents."
                 )
 
                 for document in documents:
                     document_id = document["id"]
 
-                    # Skip already processed docs
-                    if (
-                        document_id
-                        in self.processed_documents
-                    ):
+                    if document_id in self.processed_documents:
                         continue
 
                     logger.info(
-                        "Processing document %s",
-                        document_id,
+                        f"Processing document {document_id}."
                     )
 
-                    # Execute classification pipeline
-                    self.classifier.process_document(
-                        document_id
-                    )
+                    try:
+                        self.classifier.process_document(
+                            document_id
+                        )
 
-                    # Mark as processed
-                    self.processed_documents.add(
-                        document_id
-                    )
+                        self.processed_documents.add(
+                            document_id
+                        )
+
+                        logger.info(
+                            f"Document {document_id} processed."
+                        )
+
+                    except Exception:
+                        logger.exception(
+                            f"Failed processing document {document_id}."
+                        )
 
             except Exception:
                 logger.exception(
                     "Worker loop failed"
                 )
 
-            # Poll interval
-            time.sleep(
-                settings.poll_interval
-            )
+                # Prevent hot-looping
+                time.sleep(10)
+
+            time.sleep(settings.poll_interval)

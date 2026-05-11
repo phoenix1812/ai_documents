@@ -10,6 +10,7 @@ Responsible for:
 
 import json
 import logging
+import os
 
 import ollama
 
@@ -33,7 +34,7 @@ class OllamaClient:
 
     def __init__(self) -> None:
         self.client = ollama.Client(
-            host=settings.ollama_url
+            host=os.getenv("OLLAMA_HOST", "http://ollama:11434")
         )
 
     @retry(

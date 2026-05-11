@@ -1,9 +1,100 @@
 services:
+
+  # -------------------------
+  # REDIS
+  # -------------------------
+  redis:
+    image: redis:7
+    container_name: redis
+    restart: unless-stopped
+
+  # -------------------------
+  # POSTGRES
+  # -------------------------
+  db:
+    image: postgres:16
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: paperless
+      POSTGRES_USER: paperless
+      POSTGRES_PASSWORD: paperless
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+
+  # -------------------------
+  # OLLAMA
+  # -------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./ollama:/root/.ollama
+
+  # -------------------------
+  # PAPERLESS
+  # -------------------------
+  paperless:
+    image: ghcr.io/paperless-ngx/paperless-ngx:latest
+    container_name: paperless
+    restart: unless-stopped
+
+    depends_on:
+      - redis
+      - db
+
+    ports:
+      - "8000:8000"
+
+    environment:
+      PAPERLESS_REDIS: redis://redis:6379
+      PAPERLESS_DBHOST: db
+
+      PAPERLESS_TIME_ZONE: Europe/Berlin
+
+      PAPERLESS_OCR_LANGUAGE: deu+eng
+      PAPERLESS_OCR_LANGUAGES: deu eng
+
+      PAPERLESS_ADMIN_USER: admin
+      PAPERLESS_ADMIN_PASSWORD: changeme
+
+      PAPERLESS_CONSUMER_POLLING: 30
+
+      PAPERLESS_FILENAME_FORMAT: >
+        {created_year}/{correspondent}/{document_type}/{title}
+
+      PAPERLESS_OCR_ROTATE_PAGES: true
+      PAPERLESS_OCR_DESKEW: true
+      PAPERLESS_OCR_CLEAN: clean
+
+    volumes:
+      - ./data/data:/usr/src/paperless/data
+      - ./media:/usr/src/paperless/media
+      - ./consume:/usr/src/paperless/consume
+      - ./export:/usr/src/paperless/export
+
+  # -------------------------
+  # AI WORKER
+  # -------------------------
   ai-worker:
     build: .
+    container_name: ai-worker
     restart: unless-stopped
+
+    depends_on:
+      - ollama
+      - paperless
+
     env_file:
       - .env
+
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      PAPERLESS_URL: http://paperless:8000
+
     volumes:
       - ./exports:/exports
       - ./data:/data

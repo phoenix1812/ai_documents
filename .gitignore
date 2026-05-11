@@ -219,3 +219,7 @@ __marimo__/
 
 # Documents
 exports/
+data/
+media/
+ollama/
+.DS_Store
