@@ -2,9 +2,10 @@
 Document export utilities.
 
 Creates structured export directories and
-generates sanitized filenames (no spaces).
+safe, collision-resistant filenames.
 """
 
+import re
 from pathlib import Path
 
 from app.config import settings
@@ -16,7 +17,21 @@ class Exporter:
     """
 
     @staticmethod
+    def sanitize(text: str) -> str:
+        """
+        Convert arbitrary LLM output into safe filesystem names.
+        """
+
+        text = (text or "Unbekannt").strip()
+        text = text.replace("/", "_").replace("\\", "_")
+        text = text.replace(":", "_").replace(" ", "_")
+        text = re.sub(r"[^A-Za-z0-9ÄÖÜäöüß._-]", "_", text)
+        text = re.sub(r"_+", "_", text)
+        return text.strip("._-") or "Unbekannt"
+
+    @classmethod
     def build_filename(
+        cls,
         title: str,
         tags: list[str],
     ) -> str:
@@ -28,19 +43,12 @@ class Exporter:
         - safe filesystem characters only
         """
 
-        def sanitize(text: str) -> str:
-            return (
-                text.replace("/", "_")
-                .replace(":", "_")
-                .replace(" ", "_")
-                .strip()
-            )
-
-        safe_title = sanitize(title)
+        safe_title = cls.sanitize(title)
 
         safe_tags = [
-            sanitize(tag)
+            cls.sanitize(tag)
             for tag in tags
+            if tag
         ]
 
         if safe_tags:
@@ -61,16 +69,10 @@ class Exporter:
         Build final export path.
         """
 
-        def sanitize(text: str) -> str:
-            return (
-                text.replace("/", "_")
-                .replace(" ", "_")
-            )
-
         target_dir = (
             Path(settings.export_path)
-            / sanitize(document_type)
-            / sanitize(correspondent)
+            / self.sanitize(document_type)
+            / self.sanitize(correspondent)
         )
 
         target_dir.mkdir(
@@ -78,4 +80,25 @@ class Exporter:
             exist_ok=True,
         )
 
-        return target_dir / sanitize(filename)
+        return target_dir / self.sanitize(filename)
+
+    @staticmethod
+    def unique_path(path: Path) -> Path:
+        """
+        Return a non-existing path by adding _1, _2, ... if needed.
+        Prevents accidental overwrites.
+        """
+
+        if not path.exists():
+            return path
+
+        stem = path.stem
+        suffix = path.suffix
+        parent = path.parent
+
+        counter = 1
+        while True:
+            candidate = parent / f"{stem}_{counter}{suffix}"
+            if not candidate.exists():
+                return candidate
+            counter += 1

@@ -3,13 +3,24 @@ SQLite database layer for document tracking.
 """
 
 import sqlite3
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 
 STATUS_DONE = "DONE"
 STATUS_FAILED = "FAILED"
+STATUS_FAILED_OCR = "FAILED_OCR"
+STATUS_FAILED_LLM = "FAILED_LLM"
+STATUS_FAILED_EXPORT = "FAILED_EXPORT"
+STATUS_FAILED_API = "FAILED_API"
+STATUS_NEEDS_REVIEW = "NEEDS_REVIEW"
 STATUS_SKIPPED_DUPLICATE = "SKIPPED_DUPLICATE"
+
+FINAL_STATUSES = (
+    STATUS_DONE,
+    STATUS_SKIPPED_DUPLICATE,
+    STATUS_NEEDS_REVIEW,
+)
 
 
 class Database:
@@ -22,6 +33,10 @@ class Database:
             check_same_thread=False,
         )
         self._init_db()
+
+    @staticmethod
+    def _now() -> str:
+        return datetime.utcnow().isoformat()
 
     def _init_db(self) -> None:
         cursor = self.conn.cursor()
@@ -42,6 +57,16 @@ class Database:
             )
         """)
 
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_documents_paperless_id
+            ON documents (paperless_id)
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_documents_status
+            ON documents (status)
+        """)
+
         self.conn.commit()
 
     def exists_hash(self, file_hash: str) -> bool:
@@ -50,6 +75,33 @@ class Database:
         cursor.execute(
             "SELECT 1 FROM documents WHERE file_hash = ?",
             (file_hash,),
+        )
+
+        return cursor.fetchone() is not None
+
+    def exists_paperless_id(
+        self,
+        paperless_id: int,
+        statuses: tuple[str, ...] = FINAL_STATUSES,
+    ) -> bool:
+        """
+        Return True if a Paperless document already reached a final state.
+
+        This replaces the old in-memory worker set and survives restarts.
+        """
+
+        cursor = self.conn.cursor()
+        placeholders = ", ".join("?" for _ in statuses)
+
+        cursor.execute(
+            f"""
+            SELECT 1
+            FROM documents
+            WHERE paperless_id = ?
+              AND status IN ({placeholders})
+            LIMIT 1
+            """,
+            (paperless_id, *statuses),
         )
 
         return cursor.fetchone() is not None
@@ -66,6 +118,7 @@ class Database:
         error_message: str | None = None,
     ) -> None:
         cursor = self.conn.cursor()
+        now = self._now()
 
         cursor.execute("""
             INSERT OR REPLACE INTO documents (
@@ -89,8 +142,8 @@ class Database:
             export_path,
             status,
             error_message,
-            datetime.utcnow().isoformat(),
-            datetime.utcnow().isoformat(),
+            now,
+            now,
         ))
 
         self.conn.commit()
@@ -99,8 +152,10 @@ class Database:
         self,
         paperless_id: int,
         error_message: str,
+        status: str = STATUS_FAILED,
     ) -> None:
         cursor = self.conn.cursor()
+        now = self._now()
 
         cursor.execute("""
             INSERT INTO documents (
@@ -117,15 +172,15 @@ class Database:
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             paperless_id,
-            f"FAILED-{paperless_id}-{datetime.utcnow().isoformat()}",
+            f"{status}-{paperless_id}-{now}",
             "",
             "",
             "",
             "",
-            STATUS_FAILED,
+            status,
             error_message,
-            datetime.utcnow().isoformat(),
-            datetime.utcnow().isoformat(),
+            now,
+            now,
         ))
 
         self.conn.commit()

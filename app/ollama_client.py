@@ -10,7 +10,6 @@ Responsible for:
 
 import json
 import logging
-import os
 
 import ollama
 
@@ -34,7 +33,7 @@ class OllamaClient:
 
     def __init__(self) -> None:
         self.client = ollama.Client(
-            host=os.getenv("OLLAMA_HOST", "http://ollama:11434")
+            host=settings.ollama_url,
         )
 
     @retry(
@@ -79,7 +78,7 @@ class OllamaClient:
             "content"
         ]
 
-        logger.info(
+        logger.debug(
             "RAW OLLAMA OUTPUT: %s",
             raw,
         )
@@ -89,8 +88,8 @@ class OllamaClient:
 
         except json.JSONDecodeError:
             logger.error(
-                "Invalid JSON from Ollama: %s",
-                raw,
+                "Invalid JSON from Ollama. Output length: %s",
+                len(raw),
             )
             raise
 
