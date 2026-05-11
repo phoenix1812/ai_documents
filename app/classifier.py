@@ -27,8 +27,21 @@ class DocumentClassifier:
 
         # SQLite inside container volume
         self.db = Database(settings.db_path)
-    
+
     def process_document(self, document_id: int) -> None:
+        """
+        Process one Paperless document.
+
+        Skips documents that were already processed.
+        """
+
+        # 0. Skip if Paperless document was already processed
+        if self.db.document_exists(document_id):
+            logger.info(
+                "Document already processed, skipping: %s",
+                document_id,
+            )
+            return
 
         # 1. Download PDF
         file_bytes = self.paperless.download_document(
@@ -37,15 +50,15 @@ class DocumentClassifier:
 
         file_hash = sha256(file_bytes)
 
-        # 2. Duplicate check (FAST PATH)
+        # 2. Duplicate check by file hash
         if self.db.exists_hash(file_hash):
             logger.info(
-                "Duplicate skipped: %s",
+                "Duplicate skipped by hash: %s",
                 document_id,
             )
             return
 
-        # 3. OCR content
+        # 3. Get OCR content
         document = self.paperless.get_document(document_id)
         content = document.get("content", "")
 
@@ -89,4 +102,3 @@ class DocumentClassifier:
             "Exported: %s",
             target_file,
         )
-        

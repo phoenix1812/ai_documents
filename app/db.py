@@ -38,6 +38,21 @@ class Database:
 
         self.conn.commit()
 
+    def document_exists(self, paperless_id: int) -> bool:
+        cursor = self.conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT 1
+            FROM documents
+            WHERE paperless_id = ?
+            LIMIT 1
+            """,
+            (paperless_id,),
+        )
+
+        return cursor.fetchone() is not None
+
     def exists_hash(self, file_hash: str) -> bool:
         cursor = self.conn.cursor()
 
@@ -61,7 +76,7 @@ class Database:
         cursor = self.conn.cursor()
 
         cursor.execute("""
-            INSERT INTO documents (
+            INSERT OR IGNORE INTO documents (
                 paperless_id,
                 file_hash,
                 title,

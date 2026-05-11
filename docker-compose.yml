@@ -61,10 +61,10 @@ services:
       PAPERLESS_ADMIN_USER: admin
       PAPERLESS_ADMIN_PASSWORD: changeme
 
-      PAPERLESS_CONSUMER_POLLING: 30
+      PAPERLESS_CONSUMER_POLLING: 5
 
       PAPERLESS_FILENAME_FORMAT: >
-        {created_year}/{correspondent}/{document_type}/{title}
+        {{ created_year }}/{{ correspondent }}/{{ document_type }}/{{ title }}
 
       PAPERLESS_OCR_ROTATE_PAGES: true
       PAPERLESS_OCR_DESKEW: true
@@ -96,5 +96,5 @@ services:
       PAPERLESS_URL: http://paperless:8000
 
     volumes:
-      - ./exports:/exports
+      - ./export:/exports
       - ./data:/data
