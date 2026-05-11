@@ -7,6 +7,7 @@ and processes unhandled entries.
 
 import logging
 import time
+
 import requests
 
 from app.classifier import DocumentClassifier
@@ -24,21 +25,17 @@ class Worker:
     def __init__(self) -> None:
         self.classifier = DocumentClassifier()
 
-
-
-        self.processed_documents = set()
-
-    def is_paperless_available(self):
+    def is_paperless_available(self) -> bool:
         try:
             response = requests.get(
-                "http://paperless:8000",
+                settings.paperless_healthcheck_url,
                 timeout=10,
             )
             return response.status_code == 200
         except requests.RequestException:
             return False
 
-    def wait_for_paperless(self):
+    def wait_for_paperless(self) -> None:
         while not self.is_paperless_available():
             logger.info(
                 "Paperless ist nicht verfügbar. Warte..."
@@ -61,35 +58,40 @@ class Worker:
                 documents = self.classifier.paperless.get_documents()
 
                 logger.info(
-                    f"Found {len(documents)} documents."
+                    "Found %s documents.",
+                    len(documents),
                 )
 
                 for document in documents:
                     document_id = document["id"]
 
-                    if document_id in self.processed_documents:
+                    if self.classifier.db.exists_paperless_id(document_id):
+                        logger.debug(
+                            "Document %s already processed. Skipping.",
+                            document_id,
+                        )
                         continue
 
                     logger.info(
-                        f"Processing document {document_id}."
+                        "Processing document %s.",
+                        document_id,
                     )
 
                     try:
-                        self.classifier.process_document(
-                            document_id
-                        )
-
-                        self.processed_documents.add(
+                        status = self.classifier.process_document(
                             document_id
                         )
 
                         logger.info(
-                            f"Document {document_id} processed."
+                            "Document %s finished with status %s.",
+                            document_id,
+                            status,
                         )
 
                     except Exception:
                         logger.exception(
-                            f"Failed processing document {document_id}."
+                            "Failed processing document %s.",
+                            document_id,
                         )
 
             except Exception:

@@ -28,7 +28,7 @@ class Settings:
 
         self.ollama_url = os.getenv(
             "OLLAMA_URL",
-            "http://host.docker.internal:11434",
+            "http://ollama:11434",
         )
 
         # Paths
@@ -48,6 +48,20 @@ class Settings:
                 "POLL_INTERVAL",
                 "10",
             )
+        )
+
+        # Classification
+        self.confidence_threshold = float(
+            os.getenv(
+                "CONFIDENCE_THRESHOLD",
+                "0.75",
+            )
+        )
+
+        # Startup dependency check
+        self.paperless_healthcheck_url = os.getenv(
+            "PAPERLESS_HEALTHCHECK_URL",
+            self.paperless_url,
         )
 
 
