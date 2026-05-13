@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="de">
+<head>
+    <meta charset="utf-8">
+    <title>Review {{ item.id }}</title>
+    <link rel="stylesheet" href="/static/review.css">
+</head>
+<body>
+<main class="container">
+    <p><a href="/">← Zurück zur Übersicht</a></p>
+
+    <section class="detail">
+        <div class="card-top">
+            <span class="badge">{{ item.status }}</span>
+            <span class="muted">DB-ID {{ item.id }} · Paperless-ID {{ item.paperless_id }}</span>
+        </div>
+
+        <h1>{{ item.title or "Ohne Titel" }}</h1>
+
+        <dl class="detail-grid">
+            <div>
+                <dt>Korrespondent</dt>
+                <dd>{{ item.correspondent or "—" }}</dd>
+            </div>
+            <div>
+                <dt>Dokumenttyp</dt>
+                <dd>{{ item.document_type or "—" }}</dd>
+            </div>
+            <div>
+                <dt>Exportpfad</dt>
+                <dd>{{ item.export_path or "—" }}</dd>
+            </div>
+            <div>
+                <dt>Hinweis / Fehler</dt>
+                <dd>{{ item.error_message or "—" }}</dd>
+            </div>
+            <div>
+                <dt>Erstellt</dt>
+                <dd>{{ item.created_at or "—" }}</dd>
+            </div>
+            <div>
+                <dt>Verarbeitet</dt>
+                <dd>{{ item.processed_at or "—" }}</dd>
+            </div>
+        </dl>
+
+        <div class="actions">
+            <form method="post" action="/items/{{ item.id }}/approve">
+                <label class="checkbox">
+                    <input type="checkbox" name="apply_to_paperless" value="true">
+                    Titel direkt in Paperless übernehmen
+                </label>
+                <button class="button success" type="submit">Freigeben</button>
+            </form>
+
+            <form method="post" action="/items/{{ item.id }}/reject">
+                <label>
+                    Ablehnungsgrund
+                    <input type="text" name="reason" value="Falsche Klassifizierung">
+                </label>
+                <button class="button danger" type="submit">Ablehnen</button>
+            </form>
+        </div>
+
+        <p class="hint">
+            Hinweis: Aktuell wird beim Übernehmen nach Paperless nur der Titel aktualisiert.
+            Tags, Dokumenttypen und Korrespondenten brauchen als nächsten Schritt ein Mapping auf Paperless-IDs.
+        </p>
+    </section>
+</main>
+</body>
+</html>

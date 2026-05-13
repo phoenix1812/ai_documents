@@ -104,3 +104,26 @@ services:
     volumes:
       - ./export:/exports
       - ./data:/data
+  
+  ai-review-ui:
+    build: .
+    container_name: ai-review-ui
+    restart: unless-stopped
+    depends_on:
+      - ai-worker
+      - paperless
+    env_file:
+      - .env
+    environment:
+      OLLAMA_URL: http://ollama:11434
+      PAPERLESS_URL: http://paperless:8000
+      REVIEW_UI_PORT: 8090
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./export:/exports
+      - ./data:/data
+    command: >
+      uvicorn app.review_ui:app
+      --host 0.0.0.0
+      --port 8090

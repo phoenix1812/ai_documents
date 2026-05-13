@@ -1,20 +1,21 @@
-"""
-Central configuration loader.
+"""Central configuration loader.
 
-Reads all values from environment variables (.env).
+All values are read from environment variables so the application can be
+configured differently for local development, Docker Compose and production.
 """
 
 import os
 
 
 class Settings:
+    """Application settings loaded from environment variables."""
+
     def __init__(self) -> None:
         # Paperless
         self.paperless_url = os.getenv(
             "PAPERLESS_URL",
             "http://localhost:8000",
         )
-
         self.paperless_token = os.getenv(
             "PAPERLESS_TOKEN",
             "",
@@ -25,7 +26,6 @@ class Settings:
             "OLLAMA_MODEL",
             "llama3",
         )
-
         self.ollama_url = os.getenv(
             "OLLAMA_URL",
             "http://ollama:11434",
@@ -36,7 +36,6 @@ class Settings:
             "EXPORT_PATH",
             "/exports",
         )
-
         self.db_path = os.getenv(
             "DB_PATH",
             "/data",
@@ -49,13 +48,20 @@ class Settings:
                 "0.75",
             )
         )
-
         self.min_title_length = int(
             os.getenv(
                 "MIN_TITLE_LENGTH",
                 "8",
             )
         )
+
+        # Safety
+        # When enabled, the system exports and stores the classification result,
+        # but does not write metadata back to Paperless.
+        self.dry_run = os.getenv(
+            "DRY_RUN",
+            "false",
+        ).lower() in {"1", "true", "yes", "on"}
 
         # Startup dependency check
         self.paperless_healthcheck_url = os.getenv(
@@ -70,6 +76,15 @@ class Settings:
                 "8080",
             )
         )
+
+        # Review UI
+        self.review_ui_port = int(
+            os.getenv(
+                "REVIEW_UI_PORT",
+                "8090",
+            )
+)
+
 
 
 settings = Settings()

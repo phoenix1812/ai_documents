@@ -1,6 +1,4 @@
-"""
-SQLite database layer for document tracking.
-"""
+"""SQLite database layer for document tracking."""
 
 import sqlite3
 from datetime import datetime
@@ -15,18 +13,21 @@ STATUS_FAILED_EXPORT = "FAILED_EXPORT"
 STATUS_FAILED_API = "FAILED_API"
 STATUS_NEEDS_REVIEW = "NEEDS_REVIEW"
 STATUS_SKIPPED_DUPLICATE = "SKIPPED_DUPLICATE"
+STATUS_DRY_RUN = "DRY_RUN"
 
 FINAL_STATUSES = (
     STATUS_DONE,
     STATUS_SKIPPED_DUPLICATE,
     STATUS_NEEDS_REVIEW,
+    STATUS_DRY_RUN,
 )
 
 
 class Database:
+    """Small SQLite wrapper used to persist document processing state."""
+
     def __init__(self, db_path: str) -> None:
         Path(db_path).mkdir(parents=True, exist_ok=True)
-
         self.db_file = Path(db_path) / "documents.db"
         self.conn = sqlite3.connect(
             self.db_file,
@@ -40,8 +41,8 @@ class Database:
 
     def _init_db(self) -> None:
         cursor = self.conn.cursor()
-
-        cursor.execute("""
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS documents (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 paperless_id INTEGER,
@@ -55,28 +56,28 @@ class Database:
                 created_at TEXT,
                 processed_at TEXT
             )
-        """)
-
-        cursor.execute("""
+            """
+        )
+        cursor.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_documents_paperless_id
             ON documents (paperless_id)
-        """)
-
-        cursor.execute("""
+            """
+        )
+        cursor.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_documents_status
             ON documents (status)
-        """)
-
+            """
+        )
         self.conn.commit()
 
     def exists_hash(self, file_hash: str) -> bool:
         cursor = self.conn.cursor()
-
         cursor.execute(
             "SELECT 1 FROM documents WHERE file_hash = ?",
             (file_hash,),
         )
-
         return cursor.fetchone() is not None
 
     def exists_paperless_id(
@@ -84,15 +85,12 @@ class Database:
         paperless_id: int,
         statuses: tuple[str, ...] = FINAL_STATUSES,
     ) -> bool:
-        """
-        Return True if a Paperless document already reached a final state.
+        """Return True if a Paperless document already reached a final state.
 
         This replaces the old in-memory worker set and survives restarts.
         """
-
         cursor = self.conn.cursor()
         placeholders = ", ".join("?" for _ in statuses)
-
         cursor.execute(
             f"""
             SELECT 1
@@ -103,7 +101,6 @@ class Database:
             """,
             (paperless_id, *statuses),
         )
-
         return cursor.fetchone() is not None
 
     def insert_document(
@@ -119,8 +116,8 @@ class Database:
     ) -> None:
         cursor = self.conn.cursor()
         now = self._now()
-
-        cursor.execute("""
+        cursor.execute(
+            """
             INSERT OR REPLACE INTO documents (
                 paperless_id,
                 file_hash,
@@ -132,20 +129,22 @@ class Database:
                 error_message,
                 created_at,
                 processed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            paperless_id,
-            file_hash,
-            title,
-            correspondent,
-            document_type,
-            export_path,
-            status,
-            error_message,
-            now,
-            now,
-        ))
-
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                paperless_id,
+                file_hash,
+                title,
+                correspondent,
+                document_type,
+                export_path,
+                status,
+                error_message,
+                now,
+                now,
+            ),
+        )
         self.conn.commit()
 
     def mark_failed(
@@ -156,8 +155,8 @@ class Database:
     ) -> None:
         cursor = self.conn.cursor()
         now = self._now()
-
-        cursor.execute("""
+        cursor.execute(
+            """
             INSERT INTO documents (
                 paperless_id,
                 file_hash,
@@ -169,18 +168,20 @@ class Database:
                 error_message,
                 created_at,
                 processed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            paperless_id,
-            f"{status}-{paperless_id}-{now}",
-            "",
-            "",
-            "",
-            "",
-            status,
-            error_message,
-            now,
-            now,
-        ))
-
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                paperless_id,
+                f"{status}-{paperless_id}-{now}",
+                "",
+                "",
+                "",
+                "",
+                status,
+                error_message,
+                now,
+                now,
+            ),
+        )
         self.conn.commit()
