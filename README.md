@@ -1,9 +1,10 @@
 # AI Documents
 
 AI Documents ist ein lokaler, eventbasierter Dokumenten-Klassifizierer für **paperless-ngx**.
-Nach dem Import eines Dokuments ruft Paperless einen Post-Consume-Hook auf. Dieser triggert einen kleinen Python-HTTP-Service, der das Dokument aus Paperless lädt, den OCR-Text mit **Ollama** klassifiziert, das Ergebnis validiert und die Metadaten direkt in Paperless schreibt.
 
-**Paperless ist die Single Source of Truth.** PDFs werden nicht mehr in einen separaten Exportordner kopiert.
+Nach dem Import eines Dokuments ruft Paperless einen Post-Consume-Hook auf. Dieser triggert einen kleinen Python-HTTP-Service, der das Dokument aus Paperless lädt, den OCR-Text mit **Ollama** klassifiziert, das Ergebnis validiert und die Metadaten direkt in Paperless aktualisiert.
+
+Paperless bleibt dabei die **Single Source of Truth**. PDFs werden nicht mehr zusätzlich exportiert.
 
 ---
 
@@ -11,13 +12,18 @@ Nach dem Import eines Dokuments ruft Paperless einen Post-Consume-Hook auf. Dies
 
 - Eventbasierte Verarbeitung über Paperless `POST_CONSUME_SCRIPT`
 - Lokale LLM-Klassifizierung über Ollama
-- Schreibt Titel, Korrespondent, Dokumenttyp und Tags direkt nach Paperless
-- Review-Markierung über Paperless-Tag `needs-ai-review`
+- Paperless als zentrale Dokumentenablage
+- Automatisches Setzen von Paperless-Metadaten:
+  - Titel
+  - Korrespondent
+  - Dokumenttyp
+  - fachliche Tags
+- Serverseitige Titelgenerierung mit `_` statt Leerzeichen
+- Keine Review- oder Workflow-Tags in Paperless
+- Review-Status ausschließlich in SQLite und Review-UI
 - Duplikaterkennung per SHA256-Dateihash
 - Persistenter Verarbeitungsstatus in SQLite
-- Docker-Compose-Setup mit Paperless, PostgreSQL, Redis, Ollama und AI-Worker
-- Minimaler Healthcheck-Endpunkt
-- Review UI für Korrekturen und erneutes Anwenden auf Paperless
+- Docker-Compose-Setup mit Paperless, PostgreSQL, Redis, Ollama, AI-Worker und Review-UI
 
 ---
 
@@ -39,13 +45,71 @@ app/worker.py
   |
   v
 app/classifier.py
-  |--> Paperless API: Dokument + OCR + PDF-Download nur für Hash laden
-  |--> SHA256: Duplikate erkennen
-  |--> Ollama: OCR-Text klassifizieren
-  |--> Validator: Ergebnis prüfen
-  |--> Paperless API: Metadaten aktualisieren
-  |--> SQLite: Status protokollieren
+  |
+  +--> Paperless API: Dokument + OCR + PDF-Bytes laden
+  +--> SHA256: Duplikate erkennen
+  +--> Ollama: OCR-Text klassifizieren
+  +--> classifier.py: stabilen Titel bauen
+  +--> Validator: Ergebnis prüfen
+  +--> Paperless API: Metadaten aktualisieren
+  +--> SQLite: Status für Review-UI protokollieren
 ```
+
+---
+
+## Wichtige Designentscheidung
+
+Paperless speichert nur fachliche Dokumenten-Metadaten:
+
+```text
+Titel
+Korrespondent
+Dokumenttyp
+fachliche Tags
+```
+
+Workflow-Zustände bleiben in der lokalen SQLite-Datenbank:
+
+```text
+AUTO_APPROVED
+DONE
+DRY_RUN
+IGNORED
+MANUALLY_APPROVED
+NEEDS_REVIEW
+REVIEW_REQUIRED
+```
+
+Dadurch landen keine technischen Tags wie `ai_review`, `needs-ai-review` oder `review` in Paperless.
+
+---
+
+## Titel-Format
+
+Der finale Paperless-Titel wird serverseitig gebaut, nicht direkt vom LLM übernommen.
+
+Schema:
+
+```text
+Dokumenttyp_Korrespondent_Thema_Datum_Betrag
+```
+
+Beispiele:
+
+```text
+Rechnung_Amazon_Bueromaterial_2026-05-12_84,99_EUR
+Brief_Finanzamt_Steuerbescheid_2025
+Vertrag_Vodafone_Glasfaser
+Versicherung_Allianz_KFZ_2026
+```
+
+Regeln:
+
+- keine Leerzeichen
+- `_` als Trenner
+- keine `[Review]`-Präfixe
+- keine technischen Workflow-Informationen im Titel
+- maximale Länge: 120 Zeichen
 
 ---
 
@@ -54,24 +118,27 @@ app/classifier.py
 ```text
 .
 ├── app/
-│   ├── main.py              # HTTP-Trigger-Server
-│   ├── worker.py            # Eventbasierter Worker
-│   ├── classifier.py        # Hauptpipeline für Dokumentverarbeitung
-│   ├── paperless_client.py  # Paperless-ngx API Client
-│   ├── ollama_client.py     # Ollama Client
-│   ├── validator.py         # Validierung der LLM-Ergebnisse
-│   ├── db.py                # SQLite-Statusdatenbank
-│   ├── models.py            # Pydantic-Modelle
-│   ├── prompts.py           # System- und User-Prompts
-│   └── logging_config.py    # Logging-Konfiguration
+│   ├── main.py
+│   ├── worker.py
+│   ├── classifier.py
+│   ├── paperless_client.py
+│   ├── ollama_client.py
+│   ├── validator.py
+│   ├── db.py
+│   ├── models.py
+│   ├── prompts.py
+│   └── logging_config.py
 ├── scripts/
 │   └── post-consume-ai-worker.sh
 ├── tests/
 │   └── test_classifier.py
 ├── docker-compose.yml
 ├── dockerfile
-└── requirements.txt
+├── requirements.txt
+└── .env.example
 ```
+
+Hinweis: `app/exporter.py` wird für diese Variante nicht mehr benötigt, weil keine PDFs mehr exportiert werden.
 
 ---
 
@@ -79,7 +146,7 @@ app/classifier.py
 
 - Docker und Docker Compose
 - Ein lokal lauffähiges Ollama-Modell
-- Ausreichend Speicherplatz für Paperless und Ollama-Modelle
+- Paperless API Token
 
 Empfohlenes Modell für den Start:
 
@@ -93,7 +160,13 @@ Alternativ kannst du kleinere oder spezialisierte Modelle verwenden, z. B. `llam
 
 ## Konfiguration
 
-Lege im Projektverzeichnis eine `.env` Datei an. Als Vorlage kannst du `.env.example` verwenden:
+Lege im Projektverzeichnis eine `.env` Datei an. Du kannst `.env.example` kopieren:
+
+```bash
+cp .env.example .env
+```
+
+Beispiel:
 
 ```env
 PAPERLESS_URL=http://paperless:8000
@@ -104,26 +177,26 @@ OLLAMA_MODEL=llama3
 DB_PATH=/data
 CONFIDENCE_THRESHOLD=0.75
 MIN_TITLE_LENGTH=8
+DRY_RUN=false
 TRIGGER_PORT=8080
 REVIEW_UI_PORT=8090
-DRY_RUN=false
 ```
 
 ### Wichtige Variablen
 
 | Variable | Beschreibung | Standard |
 |---|---|---|
-| `PAPERLESS_URL` | Interne URL der Paperless-Instanz | `http://localhost:8000` |
-| `PAPERLESS_PUBLIC_URL` | URL für Links in der Review UI | Wert von `PAPERLESS_URL` |
+| `PAPERLESS_URL` | interne Paperless-URL im Docker-Netzwerk | `http://localhost:8000` |
+| `PAPERLESS_PUBLIC_URL` | URL für Links in der Review-UI | Wert von `PAPERLESS_URL` |
 | `PAPERLESS_TOKEN` | Paperless API Token | leer |
 | `OLLAMA_URL` | Ollama API URL | `http://ollama:11434` |
 | `OLLAMA_MODEL` | Modell für Klassifizierung | `llama3` |
 | `DB_PATH` | Pfad für SQLite-Datenbank | `/data` |
 | `CONFIDENCE_THRESHOLD` | Mindestvertrauen für Auto-Approval | `0.75` |
 | `MIN_TITLE_LENGTH` | Mindestlänge für automatisch akzeptierte Titel | `8` |
+| `DRY_RUN` | Klassifizierung speichern, aber Paperless nicht ändern | `false` |
 | `TRIGGER_PORT` | Port des AI-Worker HTTP-Servers | `8080` |
-| `REVIEW_UI_PORT` | Port der Review UI | `8090` |
-| `DRY_RUN` | Klassifizieren ohne Paperless-Metadaten zu ändern | `false` |
+| `REVIEW_UI_PORT` | Port der Review-UI | `8090` |
 
 ---
 
@@ -139,12 +212,10 @@ Danach Paperless öffnen:
 http://localhost:8000
 ```
 
-Die Admin-Zugangsdaten solltest du über `.env` setzen:
+Review-UI öffnen:
 
-```env
-PAPERLESS_ADMIN_USER=admin
-PAPERLESS_ADMIN_PASSWORD=ein-sicheres-passwort
-POSTGRES_PASSWORD=ein-sicheres-db-passwort
+```text
+http://localhost:8090
 ```
 
 ---
@@ -173,27 +244,17 @@ curl -X POST "http://localhost:8080/process?document_id=123"
 
 ---
 
-## Paperless als Single Source of Truth
+## Review-Logik
 
-Valide Klassifizierungen werden direkt in Paperless geschrieben:
-
-- Titel
-- Korrespondent
-- Dokumenttyp
-- Tags
-
-Unsichere Klassifizierungen werden nicht exportiert. Sie erhalten in Paperless:
-
-- Titelpräfix `[Review]`
-- Tag `needs-ai-review`
-- optional bereits erkannte Metadaten wie Korrespondent, Dokumenttyp und Tags
-
-Ein Dokument landet im Review, wenn z. B.:
+Ein Dokument landet in der Review-UI, wenn z. B.:
 
 - die Confidence zu niedrig ist
-- der Titel zu kurz ist
+- der Titel zu kurz oder generisch ist
 - Platzhalter wie `Unbekannt`, `Unbenannt`, `Sonstiges` verwendet wurden
 - der Dokumenttyp nicht zur erlaubten Taxonomie passt
+- ein technischer Workflow-Tag erkannt wurde
+
+Wichtig: Der Review-Zustand wird nicht in Paperless geschrieben. Es gibt also kein `ai_review`-Tag und kein `[Review]` im Titel.
 
 ---
 
@@ -208,7 +269,7 @@ Aktuell sind folgende Dokumenttypen vorgesehen:
 - `Bank`
 - `Sonstiges`
 
-Die Liste kann in `app/validator.py` angepasst werden.
+Die Liste kann in `app/validator.py` und `app/prompts.py` angepasst werden.
 
 ---
 
@@ -236,13 +297,6 @@ pip install -r requirements.txt
 pytest
 ```
 
-Falls `pytest` noch nicht in den Anforderungen enthalten ist:
-
-```bash
-pip install pytest
-pytest
-```
-
 ---
 
 ## Sicherheitshinweise
@@ -251,11 +305,11 @@ pytest
 - Standardpasswörter ändern
 - SQLite-Datenbank regelmäßig sichern
 - Den AI-Worker nicht öffentlich ins Internet stellen
-- LLM-Ausgaben immer validieren, bevor Metadaten automatisch geändert werden
+- LLM-Ausgaben immer validieren, bevor Metadaten geändert werden
+- Paperless bleibt die primäre Dokumentenablage
 
 ---
 
 ## Status
 
 Das Projekt ist ein funktionaler Prototyp für lokale, KI-gestützte Dokumentenklassifizierung mit Paperless und Ollama.
-Für produktiven Einsatz sollten Tests, Konfigurationsvalidierung, Secrets-Handling und Monitoring weiter ausgebaut werden.

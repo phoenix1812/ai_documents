@@ -1,12 +1,14 @@
-"""Document processing pipeline.
+"""
+Document processing pipeline.
 
-Paperless is the single source of truth.
-The AI worker only updates Paperless metadata and stores an audit/status log in SQLite.
-It does not export or copy PDF files anymore.
+Paperless is the single source of truth for documents and document metadata.
+This classifier no longer exports PDF files. Workflow state such as review
+requirements is stored only in SQLite for the review UI.
 """
 
 import json
 import logging
+import re
 
 import requests
 
@@ -20,13 +22,25 @@ from app.db import STATUS_FAILED_OCR
 from app.db import STATUS_NEEDS_REVIEW
 from app.db import STATUS_SKIPPED_DUPLICATE
 from app.hash_store import sha256
+from app.models import ClassificationResult
 from app.ollama_client import OllamaClient
 from app.paperless_client import PaperlessClient
 from app.validator import validate_classification
 
 logger = logging.getLogger(__name__)
 
-REVIEW_TAG = "needs-ai-review"
+TECHNICAL_WORKFLOW_TAGS = {
+    "review",
+    "ai-review",
+    "ai_review",
+    "needs-review",
+    "needs_review",
+    "needs-ai-review",
+    "needs_ai_review",
+    "duplicate",
+    "manual",
+    "manuell",
+}
 
 
 def build_ocr_excerpt(content: str, max_length: int = 3000) -> str:
@@ -39,43 +53,113 @@ def build_paperless_document_url(document_id: int) -> str:
     return f"{base_url}/documents/{document_id}/details"
 
 
-def get_result_confidence(result) -> float | None:
+def get_result_confidence(result: ClassificationResult) -> float | None:
     value = getattr(result, "confidence", None)
     if value is None:
         return None
+
     try:
         return float(value)
     except (TypeError, ValueError):
         return None
 
 
-def get_result_reason(result) -> str | None:
+def get_result_reason(result: ClassificationResult) -> str | None:
     value = getattr(result, "reason", None)
     if value is None:
         return None
+
     return str(value).strip() or None
 
 
-def add_unique_tag(tags: list[str] | None, tag: str) -> list[str]:
-    """Return tags with tag appended once, case-insensitively."""
-    result: list[str] = []
+def sanitize_title_part(value: str | None) -> str:
+    """Prepare one title component for Paperless.
+
+    Requirements:
+    - no spaces
+    - underscores as separators
+    - keep common German characters
+    - remove characters that are problematic in filenames and Paperless titles
+    """
+
+    if value is None:
+        return ""
+
+    value = str(value).strip()
+    value = value.replace("€", "EUR")
+    value = value.replace(" ", "_")
+    value = re.sub(r"[^A-Za-z0-9_\-().,äöüÄÖÜß]", "", value)
+    value = re.sub(r"_+", "_", value)
+
+    return value.strip("_")
+
+
+def build_document_title(result: ClassificationResult) -> str:
+    """Build a deterministic Paperless title from structured fields.
+
+    The LLM may provide a title, but the final Paperless title is generated here
+    to keep names consistent and to avoid generic values such as "Rechnung".
+    """
+
+    parts: list[str] = []
+
+    if result.document_type:
+        parts.append(result.document_type)
+
+    if result.correspondent:
+        parts.append(result.correspondent)
+
+    if result.subject:
+        parts.append(result.subject)
+
+    if result.document_date:
+        parts.append(result.document_date)
+
+    if result.amount:
+        parts.append(result.amount)
+
+    cleaned_parts = []
+    seen = set()
+
+    for part in parts:
+        cleaned = sanitize_title_part(part)
+        key = cleaned.lower()
+
+        if cleaned and key not in seen:
+            cleaned_parts.append(cleaned)
+            seen.add(key)
+
+    title = "_".join(cleaned_parts)
+    title = re.sub(r"_+", "_", title).strip("_")
+
+    if not title:
+        title = sanitize_title_part(result.title) or "Unbenanntes_Dokument"
+
+    return title[:120]
+
+
+def clean_paperless_tags(tags: list[str] | None) -> list[str]:
+    """Remove workflow tags before writing tags to Paperless."""
+
+    cleaned_tags: list[str] = []
     seen: set[str] = set()
 
-    for value in tags or []:
-        clean_value = str(value).strip()
-        if not clean_value:
+    for tag in tags or []:
+        clean_tag = str(tag).strip()
+        if not clean_tag:
             continue
-        key = clean_value.lower()
-        if key in seen:
+
+        normalized = clean_tag.lower().replace(" ", "_")
+        if normalized in TECHNICAL_WORKFLOW_TAGS:
             continue
-        seen.add(key)
-        result.append(clean_value)
 
-    clean_tag = tag.strip()
-    if clean_tag and clean_tag.lower() not in seen:
-        result.append(clean_tag)
+        if normalized in seen:
+            continue
 
-    return result
+        cleaned_tags.append(clean_tag)
+        seen.add(normalized)
+
+    return cleaned_tags
 
 
 class DocumentClassifier:
@@ -84,7 +168,7 @@ class DocumentClassifier:
         self.ollama = OllamaClient()
         self.db = Database(settings.db_path)
 
-    def _send_to_review(
+    def _store_review(
         self,
         document_id: int,
         file_hash: str,
@@ -99,40 +183,18 @@ class DocumentClassifier:
         ocr_excerpt: str | None,
         paperless_url: str | None,
     ) -> str:
-        """Mark a document for review in Paperless and store an audit row.
+        """Store review state in SQLite only.
 
-        No PDF is exported. Paperless remains the source of truth.
+        No review tag and no [Review] prefix is written to Paperless.
         """
-        reason_text = ", ".join(reasons)
-        review_tags = add_unique_tag(tags, REVIEW_TAG)
-        review_title = title or original_title or "Unklassifiziertes Dokument"
-
-        try:
-            applied_payload = self.paperless.update_document_metadata_by_names(
-                document_id=document_id,
-                title=f"[Review] {review_title}",
-                correspondent=correspondent,
-                document_type=document_type,
-                tags=review_tags,
-            )
-            logger.info(
-                "Paperless review metadata updated for document %s: %s",
-                document_id,
-                applied_payload,
-            )
-        except requests.RequestException:
-            logger.exception(
-                "Paperless review metadata update failed for document %s.",
-                document_id,
-            )
 
         self.db.insert_document(
             paperless_id=document_id,
             file_hash=file_hash,
-            title=review_title,
+            title=title,
             correspondent=correspondent,
             document_type=document_type,
-            tags=review_tags,
+            tags=tags,
             confidence=confidence,
             reason=reason,
             original_title=original_title,
@@ -140,7 +202,7 @@ class DocumentClassifier:
             paperless_url=paperless_url,
             export_path="",
             status=STATUS_NEEDS_REVIEW,
-            error_message=reason_text,
+            error_message=", ".join(reasons),
         )
 
         return STATUS_NEEDS_REVIEW
@@ -149,13 +211,12 @@ class DocumentClassifier:
         file_hash = ""
 
         try:
-            # Download is only used for an exact binary duplicate hash.
-            # The PDF is not stored outside Paperless.
             file_bytes = self.paperless.download_document(document_id=document_id)
             file_hash = sha256(file_bytes)
 
             if self.db.exists_hash(file_hash):
                 logger.info("Duplicate skipped by hash: %s", document_id)
+
                 self.db.insert_document(
                     paperless_id=document_id,
                     file_hash=f"{file_hash}-{document_id}-duplicate",
@@ -163,10 +224,16 @@ class DocumentClassifier:
                     correspondent="",
                     document_type="",
                     tags=[],
+                    confidence=None,
+                    reason="duplicate",
+                    original_title=None,
+                    ocr_excerpt=None,
+                    paperless_url=build_paperless_document_url(document_id),
                     export_path="",
                     status=STATUS_SKIPPED_DUPLICATE,
                     error_message=f"Duplicate hash: {file_hash}",
                 )
+
                 return STATUS_SKIPPED_DUPLICATE
 
             document = self.paperless.get_document(document_id)
@@ -192,6 +259,7 @@ class DocumentClassifier:
                     status=STATUS_FAILED_OCR,
                     error_message="No OCR content",
                 )
+
                 return STATUS_FAILED_OCR
 
             try:
@@ -213,14 +281,18 @@ class DocumentClassifier:
                     status=STATUS_FAILED_LLM,
                     error_message=str(exc),
                 )
+
                 return STATUS_FAILED_LLM
+
+            result.tags = clean_paperless_tags(result.tags)
+            result.title = build_document_title(result)
 
             confidence = get_result_confidence(result)
             reason = get_result_reason(result)
-            validation = validate_classification(result)
 
+            validation = validate_classification(result)
             if not validation.valid:
-                return self._send_to_review(
+                return self._store_review(
                     document_id=document_id,
                     file_hash=file_hash,
                     title=result.title,
@@ -252,6 +324,7 @@ class DocumentClassifier:
                     status=STATUS_DRY_RUN,
                     error_message="Dry run: Paperless metadata was not updated.",
                 )
+
                 return STATUS_DRY_RUN
 
             applied_payload = self.paperless.update_document_metadata_by_names(

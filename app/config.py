@@ -1,7 +1,8 @@
-"""Central configuration loader.
+"""
+Central configuration loader.
 
-All values are read from environment variables so the application can be configured
-for local development, Docker Compose and production.
+All values are read from environment variables so the application can be
+configured differently for local development, Docker Compose and production.
 """
 
 import os
@@ -56,7 +57,7 @@ class Settings:
         )
 
         # Safety
-        # When enabled, the system stores the classification result,
+        # When enabled, the system stores the classification result in SQLite,
         # but does not write metadata back to Paperless.
         self.dry_run = os.getenv(
             "DRY_RUN",
