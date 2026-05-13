@@ -226,3 +226,4 @@ ollama/
 export/
 data/documents.db
 consume/
+paperless-data/
