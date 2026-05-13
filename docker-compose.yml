@@ -49,6 +49,7 @@ services:
     environment:
       PAPERLESS_REDIS: redis://redis:6379
       PAPERLESS_DBHOST: db
+      PAPERLESS_DBPASS: ${POSTGRES_PASSWORD:-paperless}
       PAPERLESS_TIME_ZONE: Europe/Berlin
       PAPERLESS_OCR_LANGUAGE: deu+eng
       PAPERLESS_OCR_LANGUAGES: deu eng
@@ -60,7 +61,6 @@ services:
       PAPERLESS_OCR_ROTATE_PAGES: true
       PAPERLESS_OCR_DESKEW: true
       PAPERLESS_OCR_CLEAN: clean
-      # Event-driven AI trigger after Paperless has consumed a document.
       PAPERLESS_POST_CONSUME_SCRIPT: /usr/src/paperless/scripts/post-consume-ai-worker.sh
       AI_WORKER_TRIGGER_URL: http://ai-worker:8080/process
     volumes:
