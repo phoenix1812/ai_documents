@@ -1,5 +1,11 @@
 """
 SQLite database layer for document tracking.
+
+Stores:
+- processed Paperless document IDs
+- classification suggestions
+- review metadata
+- safety/status information
 """
 
 import json
@@ -45,6 +51,18 @@ class Database:
         cursor.execute(f"PRAGMA table_info({table})")
         return any(row[1] == column for row in cursor.fetchall())
 
+    def _add_column_if_missing(
+        self,
+        table: str,
+        column: str,
+        definition: str,
+    ) -> None:
+        if not self._column_exists(table, column):
+            cursor = self.conn.cursor()
+            cursor.execute(
+                f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+            )
+
     def _init_db(self) -> None:
         cursor = self.conn.cursor()
 
@@ -57,6 +75,11 @@ class Database:
                 correspondent TEXT,
                 document_type TEXT,
                 tags TEXT,
+                confidence REAL,
+                reason TEXT,
+                original_title TEXT,
+                ocr_excerpt TEXT,
+                paperless_url TEXT,
                 export_path TEXT,
                 status TEXT,
                 error_message TEXT,
@@ -65,8 +88,36 @@ class Database:
             )
         """)
 
-        if not self._column_exists("documents", "tags"):
-            cursor.execute("ALTER TABLE documents ADD COLUMN tags TEXT DEFAULT '[]'")
+        self._add_column_if_missing(
+            "documents",
+            "tags",
+            "TEXT DEFAULT '[]'",
+        )
+        self._add_column_if_missing(
+            "documents",
+            "confidence",
+            "REAL",
+        )
+        self._add_column_if_missing(
+            "documents",
+            "reason",
+            "TEXT",
+        )
+        self._add_column_if_missing(
+            "documents",
+            "original_title",
+            "TEXT",
+        )
+        self._add_column_if_missing(
+            "documents",
+            "ocr_excerpt",
+            "TEXT",
+        )
+        self._add_column_if_missing(
+            "documents",
+            "paperless_url",
+            "TEXT",
+        )
 
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_documents_paperless_id
@@ -93,7 +144,6 @@ class Database:
         paperless_id: int,
         statuses: tuple[str, ...] = FINAL_STATUSES,
     ) -> bool:
-        """Return True if a Paperless document already reached a final state."""
         cursor = self.conn.cursor()
         placeholders = ", ".join("?" for _ in statuses)
 
@@ -120,6 +170,11 @@ class Database:
         status: str = STATUS_DONE,
         error_message: str | None = None,
         tags: list[str] | None = None,
+        confidence: float | None = None,
+        reason: str | None = None,
+        original_title: str | None = None,
+        ocr_excerpt: str | None = None,
+        paperless_url: str | None = None,
     ) -> None:
         cursor = self.conn.cursor()
         now = self._now()
@@ -133,13 +188,18 @@ class Database:
                 correspondent,
                 document_type,
                 tags,
+                confidence,
+                reason,
+                original_title,
+                ocr_excerpt,
+                paperless_url,
                 export_path,
                 status,
                 error_message,
                 created_at,
                 processed_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             paperless_id,
             file_hash,
@@ -147,6 +207,11 @@ class Database:
             correspondent,
             document_type,
             tags_json,
+            confidence,
+            reason,
+            original_title,
+            ocr_excerpt,
+            paperless_url,
             export_path,
             status,
             error_message,
@@ -173,13 +238,18 @@ class Database:
                 correspondent,
                 document_type,
                 tags,
+                confidence,
+                reason,
+                original_title,
+                ocr_excerpt,
+                paperless_url,
                 export_path,
                 status,
                 error_message,
                 created_at,
                 processed_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             paperless_id,
             f"{status}-{paperless_id}-{now}",
@@ -187,6 +257,11 @@ class Database:
             "",
             "",
             "[]",
+            None,
+            None,
+            None,
+            None,
+            None,
             "",
             status,
             error_message,

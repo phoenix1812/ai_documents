@@ -10,7 +10,7 @@
     <header class="header">
         <div>
             <h1>AI Documents Review</h1>
-            <p>Prüfe Klassifizierungen und übernimm sie nach Paperless.</p>
+            <p>Prüfe Klassifizierungen mit Confidence, Begründung und Dokumentkontext.</p>
         </div>
     </header>
 
@@ -31,12 +31,18 @@
                 <article class="card">
                     <div class="card-top">
                         <span class="badge">{{ item.status }}</span>
-                        <span class="muted">DB-ID {{ item.id }} · Paperless-ID {{ item.paperless_id }}</span>
+                        <span class="confidence {{ item.confidence_class }}">{{ item.confidence_display }}</span>
                     </div>
+
+                    <p class="muted">DB-ID {{ item.id }} · Paperless-ID {{ item.paperless_id }}</p>
 
                     <h2>{{ item.title or "Ohne Titel" }}</h2>
 
                     <dl>
+                        <div>
+                            <dt>Originaltitel</dt>
+                            <dd>{{ item.original_title or "—" }}</dd>
+                        </div>
                         <div>
                             <dt>Typ</dt>
                             <dd>{{ item.document_type or "—" }}</dd>
@@ -50,8 +56,8 @@
                             <dd>{{ item.tags_display or "—" }}</dd>
                         </div>
                         <div>
-                            <dt>Hinweis</dt>
-                            <dd>{{ item.error_message or "—" }}</dd>
+                            <dt>Begründung</dt>
+                            <dd>{{ item.reason or "—" }}</dd>
                         </div>
                     </dl>
 

@@ -16,6 +16,12 @@ class Settings:
             "PAPERLESS_URL",
             "http://localhost:8000",
         )
+
+        self.paperless_public_url = os.getenv(
+            "PAPERLESS_PUBLIC_URL",
+            self.paperless_url,
+        ).rstrip("/")
+        
         self.paperless_token = os.getenv(
             "PAPERLESS_TOKEN",
             "",

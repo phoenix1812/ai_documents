@@ -32,6 +32,44 @@ from app.validator import validate_classification
 logger = logging.getLogger(__name__)
 
 
+def build_ocr_excerpt(content: str, max_length: int = 3000) -> str:
+    """
+    Create a compact OCR excerpt for review.
+
+    Keeps the beginning of the OCR text because document sender,
+    title, invoice number and date are usually near the top.
+    """
+    cleaned = " ".join(content.split())
+    return cleaned[:max_length]
+
+
+def build_paperless_document_url(document_id: int) -> str:
+    """Build a direct Paperless document URL for browser review."""
+    base_url = settings.paperless_public_url.rstrip("/")
+    return f"{base_url}/documents/{document_id}/details"
+
+
+def get_result_confidence(result) -> float | None:
+    """Read confidence from the model result if present."""
+    value = getattr(result, "confidence", None)
+    if value is None:
+        return None
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def get_result_reason(result) -> str | None:
+    """Read classification reason from the model result if present."""
+    value = getattr(result, "reason", None)
+    if value is None:
+        return None
+
+    return str(value).strip() or None
+
+
 class DocumentClassifier:
     def __init__(self) -> None:
         self.paperless = PaperlessClient()
@@ -57,6 +95,11 @@ class DocumentClassifier:
         document_type: str,
         tags: list[str],
         reasons: list[str],
+        confidence: float | None,
+        reason: str | None,
+        original_title: str | None,
+        ocr_excerpt: str | None,
+        paperless_url: str | None,
     ) -> str:
         """Export document to _REVIEW and persist NEEDS_REVIEW state."""
         filename = self.exporter.build_review_filename(
@@ -77,6 +120,11 @@ class DocumentClassifier:
                 correspondent=correspondent,
                 document_type=document_type,
                 tags=tags,
+                confidence=confidence,
+                reason=reason,
+                original_title=original_title,
+                ocr_excerpt=ocr_excerpt,
+                paperless_url=paperless_url,
                 export_path=str(target_file),
                 status=STATUS_FAILED_EXPORT,
                 error_message=str(exc),
@@ -92,6 +140,11 @@ class DocumentClassifier:
             correspondent=correspondent,
             document_type=document_type,
             tags=tags,
+            confidence=confidence,
+            reason=reason,
+            original_title=original_title,
+            ocr_excerpt=ocr_excerpt,
+            paperless_url=paperless_url,
             export_path=str(target_file),
             status=STATUS_NEEDS_REVIEW,
             error_message=reason_text,
@@ -155,6 +208,9 @@ class DocumentClassifier:
 
             document = self.paperless.get_document(document_id)
             content = document.get("content", "")
+            original_title = document.get("title") or ""
+            paperless_url = build_paperless_document_url(document_id)
+            ocr_excerpt = build_ocr_excerpt(content)
 
             if not content:
                 logger.warning(
@@ -168,6 +224,11 @@ class DocumentClassifier:
                     correspondent="",
                     document_type="",
                     tags=[],
+                    confidence=None,
+                    reason=None,
+                    original_title=original_title,
+                    ocr_excerpt="",
+                    paperless_url=paperless_url,
                     export_path="",
                     status=STATUS_FAILED_OCR,
                     error_message="No OCR content",
@@ -184,11 +245,19 @@ class DocumentClassifier:
                     correspondent="",
                     document_type="",
                     tags=[],
+                    confidence=None,
+                    reason=None,
+                    original_title=original_title,
+                    ocr_excerpt=ocr_excerpt,
+                    paperless_url=paperless_url,
                     export_path="",
                     status=STATUS_FAILED_LLM,
                     error_message=str(exc),
                 )
                 return STATUS_FAILED_LLM
+
+            confidence = get_result_confidence(result)
+            reason = get_result_reason(result)
 
             validation = validate_classification(result)
 
@@ -202,6 +271,11 @@ class DocumentClassifier:
                     document_type=result.document_type,
                     tags=result.tags,
                     reasons=validation.reasons,
+                    confidence=confidence,
+                    reason=reason,
+                    original_title=original_title,
+                    ocr_excerpt=ocr_excerpt,
+                    paperless_url=paperless_url,
                 )
 
             filename = self.exporter.build_filename(
@@ -225,6 +299,11 @@ class DocumentClassifier:
                     correspondent=result.correspondent,
                     document_type=result.document_type,
                     tags=result.tags,
+                    confidence=confidence,
+                    reason=reason,
+                    original_title=original_title,
+                    ocr_excerpt=ocr_excerpt,
+                    paperless_url=paperless_url,
                     export_path=str(target_file),
                     status=STATUS_FAILED_EXPORT,
                     error_message=str(exc),
@@ -239,6 +318,11 @@ class DocumentClassifier:
                     correspondent=result.correspondent,
                     document_type=result.document_type,
                     tags=result.tags,
+                    confidence=confidence,
+                    reason=reason,
+                    original_title=original_title,
+                    ocr_excerpt=ocr_excerpt,
+                    paperless_url=paperless_url,
                     export_path=str(target_file),
                     status=STATUS_DRY_RUN,
                     error_message="Dry run: Paperless metadata was not updated.",
@@ -246,12 +330,13 @@ class DocumentClassifier:
 
                 logger.info(
                     "[DRY RUN] Would update document %s with title=%s, "
-                    "correspondent=%s, document_type=%s, tags=%s",
+                    "correspondent=%s, document_type=%s, tags=%s, confidence=%s",
                     document_id,
                     result.title,
                     result.correspondent,
                     result.document_type,
                     result.tags,
+                    confidence,
                 )
 
                 return STATUS_DRY_RUN
@@ -271,6 +356,11 @@ class DocumentClassifier:
                 correspondent=result.correspondent,
                 document_type=result.document_type,
                 tags=result.tags,
+                confidence=confidence,
+                reason=reason,
+                original_title=original_title,
+                ocr_excerpt=ocr_excerpt,
+                paperless_url=paperless_url,
                 export_path=str(target_file),
                 status="DONE",
                 error_message=f"Applied to Paperless: {applied_payload}",

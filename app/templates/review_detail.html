@@ -6,77 +6,94 @@
     <link rel="stylesheet" href="/static/review.css">
 </head>
 <body>
-<main class="container">
+<main class="container wide">
     <p><a href="/">← Zurück zur Übersicht</a></p>
 
-    <section class="detail">
-        <div class="card-top">
+    <section class="detail-header">
+        <div>
             <span class="badge">{{ item.status }}</span>
-            <span class="muted">DB-ID {{ item.id }} · Paperless-ID {{ item.paperless_id }}</span>
+            <h1>{{ item.title or "Ohne Titel" }}</h1>
+            <p class="muted">DB-ID {{ item.id }} · Paperless-ID {{ item.paperless_id }}</p>
         </div>
 
-        <h1>{{ item.title or "Ohne Titel" }}</h1>
+        <div class="header-actions">
+            <span class="confidence big {{ item.confidence_class }}">{{ item.confidence_display }}</span>
+            {% if item.paperless_url %}
+                <a class="button secondary" href="{{ item.paperless_url }}" target="_blank" rel="noopener">
+                    In Paperless öffnen
+                </a>
+            {% endif %}
+        </div>
+    </section>
 
-        <form method="post" action="/items/{{ item.id }}/approve" class="edit-form">
-            <label>
-                Titel
-                <input type="text" name="title" value="{{ item.title or '' }}" required>
-            </label>
+    <section class="review-layout">
+        <aside class="panel">
+            <h2>Dokumentkontext</h2>
 
-            <label>
-                Korrespondent
-                <input type="text" name="correspondent" value="{{ item.correspondent or '' }}">
-            </label>
-
-            <label>
-                Dokumenttyp
-                <input type="text" name="document_type" value="{{ item.document_type or '' }}">
-            </label>
-
-            <label>
-                Tags, kommagetrennt
-                <input type="text" name="tags" value="{{ item.tags_display or '' }}">
-            </label>
-
-            <dl class="detail-grid">
+            <dl class="detail-grid single">
+                <div>
+                    <dt>Originaltitel</dt>
+                    <dd>{{ item.original_title or "—" }}</dd>
+                </div>
                 <div>
                     <dt>Exportpfad</dt>
                     <dd>{{ item.export_path or "—" }}</dd>
                 </div>
                 <div>
-                    <dt>Hinweis / Fehler</dt>
+                    <dt>Hinweis / Validierung</dt>
                     <dd>{{ item.error_message or "—" }}</dd>
-                </div>
-                <div>
-                    <dt>Erstellt</dt>
-                    <dd>{{ item.created_at or "—" }}</dd>
-                </div>
-                <div>
-                    <dt>Verarbeitet</dt>
-                    <dd>{{ item.processed_at or "—" }}</dd>
                 </div>
             </dl>
 
-            <label class="checkbox">
-                <input type="checkbox" name="apply_to_paperless" value="true" checked>
-                Nach Paperless übernehmen: Titel, Korrespondent, Dokumenttyp und Tags
-            </label>
+            <h3>OCR-Auszug</h3>
+            <pre class="ocr-box">{{ item.ocr_excerpt or "Kein OCR-Auszug vorhanden." }}</pre>
+        </aside>
 
-            <button class="button success" type="submit">Freigeben und speichern</button>
-        </form>
+        <section class="panel">
+            <h2>KI-Vorschlag bearbeiten</h2>
 
-        <form method="post" action="/items/{{ item.id }}/reject" class="reject-form">
-            <label>
-                Ablehnungsgrund
-                <input type="text" name="reason" value="Falsche Klassifizierung">
-            </label>
-            <button class="button danger" type="submit">Ablehnen</button>
-        </form>
+            <div class="ai-reason">
+                <strong>KI-Begründung:</strong>
+                <p>{{ item.reason or "Keine Begründung gespeichert." }}</p>
+            </div>
 
-        <p class="hint">
-            Beim Freigeben sucht die App passende Paperless-Objekte anhand des Namens.
-            Falls Korrespondent, Dokumenttyp oder Tag nicht existieren, werden sie automatisch angelegt.
-        </p>
+            <form method="post" action="/items/{{ item.id }}/approve" class="edit-form">
+                <label>
+                    Titel
+                    <input type="text" name="title" value="{{ item.title or '' }}" required>
+                </label>
+
+                <label>
+                    Korrespondent
+                    <input type="text" name="correspondent" value="{{ item.correspondent or '' }}">
+                </label>
+
+                <label>
+                    Dokumenttyp
+                    <input type="text" name="document_type" value="{{ item.document_type or '' }}">
+                </label>
+
+                <label>
+                    Tags, kommagetrennt
+                    <input type="text" name="tags" value="{{ item.tags_display or '' }}">
+                </label>
+
+                <label class="checkbox">
+                    <input type="checkbox" name="apply_to_paperless" value="true" checked>
+                    Nach Paperless übernehmen
+                </label>
+
+                <button class="button success" type="submit">Freigeben und speichern</button>
+            </form>
+
+            <form method="post" action="/items/{{ item.id }}/reject" class="reject-form">
+                <label>
+                    Ablehnungsgrund
+                    <input type="text" name="reason" value="Falsche Klassifizierung">
+                </label>
+                <button class="button danger" type="submit">Ablehnen</button>
+            </form>
+        </section>
     </section>
 </main>
 </body>
