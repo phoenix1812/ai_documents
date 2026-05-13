@@ -5,7 +5,7 @@ Document processing pipeline:
 - validation of LLM output
 - duplicate detection via SQLite
 - final export or review export
-- basic Paperless metadata update
+- Paperless metadata update
 """
 
 import json
@@ -15,6 +15,7 @@ import requests
 
 from app.config import settings
 from app.db import Database
+from app.db import STATUS_DRY_RUN
 from app.db import STATUS_FAILED_API
 from app.db import STATUS_FAILED_EXPORT
 from app.db import STATUS_FAILED_LLM
@@ -36,8 +37,6 @@ class DocumentClassifier:
         self.paperless = PaperlessClient()
         self.ollama = OllamaClient()
         self.exporter = Exporter()
-
-        # SQLite inside container volume
         self.db = Database(settings.db_path)
 
     def _write_bytes(
@@ -56,12 +55,10 @@ class DocumentClassifier:
         title: str,
         correspondent: str,
         document_type: str,
+        tags: list[str],
         reasons: list[str],
     ) -> str:
-        """
-        Export document to _REVIEW and persist NEEDS_REVIEW state.
-        """
-
+        """Export document to _REVIEW and persist NEEDS_REVIEW state."""
         filename = self.exporter.build_review_filename(
             document_id=document_id,
             file_hash=file_hash,
@@ -79,6 +76,7 @@ class DocumentClassifier:
                 title=title,
                 correspondent=correspondent,
                 document_type=document_type,
+                tags=tags,
                 export_path=str(target_file),
                 status=STATUS_FAILED_EXPORT,
                 error_message=str(exc),
@@ -93,6 +91,7 @@ class DocumentClassifier:
             title=title,
             correspondent=correspondent,
             document_type=document_type,
+            tags=tags,
             export_path=str(target_file),
             status=STATUS_NEEDS_REVIEW,
             error_message=reason_text,
@@ -128,18 +127,14 @@ class DocumentClassifier:
         Processing state is persisted in SQLite.
         Documents with unsafe classification results are sent to _REVIEW.
         """
-
         file_hash = ""
 
         try:
-            # 1. Download PDF
             file_bytes = self.paperless.download_document(
                 document_id=document_id,
             )
-
             file_hash = sha256(file_bytes)
 
-            # 2. Duplicate check by file hash
             if self.db.exists_hash(file_hash):
                 logger.info(
                     "Duplicate skipped by hash: %s",
@@ -151,13 +146,13 @@ class DocumentClassifier:
                     title="",
                     correspondent="",
                     document_type="",
+                    tags=[],
                     export_path="",
                     status=STATUS_SKIPPED_DUPLICATE,
                     error_message=f"Duplicate hash: {file_hash}",
                 )
                 return STATUS_SKIPPED_DUPLICATE
 
-            # 3. Get OCR content
             document = self.paperless.get_document(document_id)
             content = document.get("content", "")
 
@@ -166,21 +161,19 @@ class DocumentClassifier:
                     "No OCR content: %s",
                     document_id,
                 )
-                # No OCR can not be classified safely. Keep this as OCR failure,
-                # not review, because manual review can not fix missing OCR metadata.
                 self.db.insert_document(
                     paperless_id=document_id,
                     file_hash=file_hash,
                     title="",
                     correspondent="",
                     document_type="",
+                    tags=[],
                     export_path="",
                     status=STATUS_FAILED_OCR,
                     error_message="No OCR content",
                 )
                 return STATUS_FAILED_OCR
 
-            # 4. LLM classification
             try:
                 result = self.ollama.classify(content)
             except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
@@ -190,14 +183,15 @@ class DocumentClassifier:
                     title="",
                     correspondent="",
                     document_type="",
+                    tags=[],
                     export_path="",
                     status=STATUS_FAILED_LLM,
                     error_message=str(exc),
                 )
                 return STATUS_FAILED_LLM
 
-            # 5. Validate classification before final export
             validation = validate_classification(result)
+
             if not validation.valid:
                 return self._send_to_review(
                     document_id=document_id,
@@ -206,15 +200,14 @@ class DocumentClassifier:
                     title=result.title,
                     correspondent=result.correspondent,
                     document_type=result.document_type,
+                    tags=result.tags,
                     reasons=validation.reasons,
                 )
 
-            # 6. Build safe filename and final export path
             filename = self.exporter.build_filename(
                 title=result.title,
                 tags=result.tags,
             )
-
             target_file = self.exporter.export_path(
                 document_type=result.document_type,
                 correspondent=result.correspondent,
@@ -222,7 +215,6 @@ class DocumentClassifier:
             )
             target_file = self.exporter.unique_path(target_file)
 
-            # 7. Write file
             try:
                 self._write_bytes(target_file, file_bytes)
             except OSError as exc:
@@ -232,33 +224,60 @@ class DocumentClassifier:
                     title=result.title,
                     correspondent=result.correspondent,
                     document_type=result.document_type,
+                    tags=result.tags,
                     export_path=str(target_file),
                     status=STATUS_FAILED_EXPORT,
                     error_message=str(exc),
                 )
                 return STATUS_FAILED_EXPORT
 
-            # 8. Store in DB
+            if settings.dry_run:
+                self.db.insert_document(
+                    paperless_id=document_id,
+                    file_hash=file_hash,
+                    title=result.title,
+                    correspondent=result.correspondent,
+                    document_type=result.document_type,
+                    tags=result.tags,
+                    export_path=str(target_file),
+                    status=STATUS_DRY_RUN,
+                    error_message="Dry run: Paperless metadata was not updated.",
+                )
+
+                logger.info(
+                    "[DRY RUN] Would update document %s with title=%s, "
+                    "correspondent=%s, document_type=%s, tags=%s",
+                    document_id,
+                    result.title,
+                    result.correspondent,
+                    result.document_type,
+                    result.tags,
+                )
+
+                return STATUS_DRY_RUN
+
+            applied_payload = self.paperless.update_document_metadata_by_names(
+                document_id=document_id,
+                title=result.title,
+                correspondent=result.correspondent,
+                document_type=result.document_type,
+                tags=result.tags,
+            )
+
             self.db.insert_document(
                 paperless_id=document_id,
                 file_hash=file_hash,
                 title=result.title,
                 correspondent=result.correspondent,
                 document_type=result.document_type,
+                tags=result.tags,
                 export_path=str(target_file),
-            )
-
-            # 9. Minimal Paperless metadata update.
-            # More advanced metadata updates require mapping names to Paperless IDs.
-            self.paperless.update_document(
-                document_id=document_id,
-                payload={
-                    "title": result.title,
-                },
+                status="DONE",
+                error_message=f"Applied to Paperless: {applied_payload}",
             )
 
             logger.info(
-                "Exported: %s",
+                "Exported and updated Paperless metadata: %s",
                 target_file,
             )
 
@@ -271,7 +290,6 @@ class DocumentClassifier:
                 status=STATUS_FAILED_API,
             )
             raise
-
         except Exception as exc:
             self.db.mark_failed(
                 paperless_id=document_id,

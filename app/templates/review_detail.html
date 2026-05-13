@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="de">
+<head>
+    <meta charset="utf-8">
+    <title>Review {{ item.id }}</title>
+    <link rel="stylesheet" href="/static/review.css">
+</head>
+<body>
+<main class="container">
+    <p><a href="/">← Zurück zur Übersicht</a></p>
+
+    <section class="detail">
+        <div class="card-top">
+            <span class="badge">{{ item.status }}</span>
+            <span class="muted">DB-ID {{ item.id }} · Paperless-ID {{ item.paperless_id }}</span>
+        </div>
+
+        <h1>{{ item.title or "Ohne Titel" }}</h1>
+
+        <form method="post" action="/items/{{ item.id }}/approve" class="edit-form">
+            <label>
+                Titel
+                <input type="text" name="title" value="{{ item.title or '' }}" required>
+            </label>
+
+            <label>
+                Korrespondent
+                <input type="text" name="correspondent" value="{{ item.correspondent or '' }}">
+            </label>
+
+            <label>
+                Dokumenttyp
+                <input type="text" name="document_type" value="{{ item.document_type or '' }}">
+            </label>
+
+            <label>
+                Tags, kommagetrennt
+                <input type="text" name="tags" value="{{ item.tags_display or '' }}">
+            </label>
+
+            <dl class="detail-grid">
+                <div>
+                    <dt>Exportpfad</dt>
+                    <dd>{{ item.export_path or "—" }}</dd>
+                </div>
+                <div>
+                    <dt>Hinweis / Fehler</dt>
+                    <dd>{{ item.error_message or "—" }}</dd>
+                </div>
+                <div>
+                    <dt>Erstellt</dt>
+                    <dd>{{ item.created_at or "—" }}</dd>
+                </div>
+                <div>
+                    <dt>Verarbeitet</dt>
+                    <dd>{{ item.processed_at or "—" }}</dd>
+                </div>
+            </dl>
+
+            <label class="checkbox">
+                <input type="checkbox" name="apply_to_paperless" value="true" checked>
+                Nach Paperless übernehmen: Titel, Korrespondent, Dokumenttyp und Tags
+            </label>
+
+            <button class="button success" type="submit">Freigeben und speichern</button>
+        </form>
+
+        <form method="post" action="/items/{{ item.id }}/reject" class="reject-form">
+            <label>
+                Ablehnungsgrund
+                <input type="text" name="reason" value="Falsche Klassifizierung">
+            </label>
+            <button class="button danger" type="submit">Ablehnen</button>
+        </form>
+
+        <p class="hint">
+            Beim Freigeben sucht die App passende Paperless-Objekte anhand des Namens.
+            Falls Korrespondent, Dokumenttyp oder Tag nicht existieren, werden sie automatisch angelegt.
+        </p>
+    </section>
+</main>
+</body>
+</html>
