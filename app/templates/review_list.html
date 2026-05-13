@@ -10,7 +10,7 @@
     <header class="header">
         <div>
             <h1>AI Documents Review</h1>
-            <p>Prüfe unsichere Klassifizierungen und Dry-Run-Ergebnisse.</p>
+            <p>Prüfe Klassifizierungen und übernimm sie nach Paperless.</p>
         </div>
     </header>
 
@@ -44,6 +44,10 @@
                         <div>
                             <dt>Korrespondent</dt>
                             <dd>{{ item.correspondent or "—" }}</dd>
+                        </div>
+                        <div>
+                            <dt>Tags</dt>
+                            <dd>{{ item.tags_display or "—" }}</dd>
                         </div>
                         <div>
                             <dt>Hinweis</dt>

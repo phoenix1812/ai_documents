@@ -17,54 +17,65 @@
 
         <h1>{{ item.title or "Ohne Titel" }}</h1>
 
-        <dl class="detail-grid">
-            <div>
-                <dt>Korrespondent</dt>
-                <dd>{{ item.correspondent or "—" }}</dd>
-            </div>
-            <div>
-                <dt>Dokumenttyp</dt>
-                <dd>{{ item.document_type or "—" }}</dd>
-            </div>
-            <div>
-                <dt>Exportpfad</dt>
-                <dd>{{ item.export_path or "—" }}</dd>
-            </div>
-            <div>
-                <dt>Hinweis / Fehler</dt>
-                <dd>{{ item.error_message or "—" }}</dd>
-            </div>
-            <div>
-                <dt>Erstellt</dt>
-                <dd>{{ item.created_at or "—" }}</dd>
-            </div>
-            <div>
-                <dt>Verarbeitet</dt>
-                <dd>{{ item.processed_at or "—" }}</dd>
-            </div>
-        </dl>
+        <form method="post" action="/items/{{ item.id }}/approve" class="edit-form">
+            <label>
+                Titel
+                <input type="text" name="title" value="{{ item.title or '' }}" required>
+            </label>
 
-        <div class="actions">
-            <form method="post" action="/items/{{ item.id }}/approve">
-                <label class="checkbox">
-                    <input type="checkbox" name="apply_to_paperless" value="true">
-                    Titel direkt in Paperless übernehmen
-                </label>
-                <button class="button success" type="submit">Freigeben</button>
-            </form>
+            <label>
+                Korrespondent
+                <input type="text" name="correspondent" value="{{ item.correspondent or '' }}">
+            </label>
 
-            <form method="post" action="/items/{{ item.id }}/reject">
-                <label>
-                    Ablehnungsgrund
-                    <input type="text" name="reason" value="Falsche Klassifizierung">
-                </label>
-                <button class="button danger" type="submit">Ablehnen</button>
-            </form>
-        </div>
+            <label>
+                Dokumenttyp
+                <input type="text" name="document_type" value="{{ item.document_type or '' }}">
+            </label>
+
+            <label>
+                Tags, kommagetrennt
+                <input type="text" name="tags" value="{{ item.tags_display or '' }}">
+            </label>
+
+            <dl class="detail-grid">
+                <div>
+                    <dt>Exportpfad</dt>
+                    <dd>{{ item.export_path or "—" }}</dd>
+                </div>
+                <div>
+                    <dt>Hinweis / Fehler</dt>
+                    <dd>{{ item.error_message or "—" }}</dd>
+                </div>
+                <div>
+                    <dt>Erstellt</dt>
+                    <dd>{{ item.created_at or "—" }}</dd>
+                </div>
+                <div>
+                    <dt>Verarbeitet</dt>
+                    <dd>{{ item.processed_at or "—" }}</dd>
+                </div>
+            </dl>
+
+            <label class="checkbox">
+                <input type="checkbox" name="apply_to_paperless" value="true" checked>
+                Nach Paperless übernehmen: Titel, Korrespondent, Dokumenttyp und Tags
+            </label>
+
+            <button class="button success" type="submit">Freigeben und speichern</button>
+        </form>
+
+        <form method="post" action="/items/{{ item.id }}/reject" class="reject-form">
+            <label>
+                Ablehnungsgrund
+                <input type="text" name="reason" value="Falsche Klassifizierung">
+            </label>
+            <button class="button danger" type="submit">Ablehnen</button>
+        </form>
 
         <p class="hint">
-            Hinweis: Aktuell wird beim Übernehmen nach Paperless nur der Titel aktualisiert.
-            Tags, Dokumenttypen und Korrespondenten brauchen als nächsten Schritt ein Mapping auf Paperless-IDs.
+            Beim Freigeben sucht die App passende Paperless-Objekte anhand des Namens.
+            Falls Korrespondent, Dokumenttyp oder Tag nicht existieren, werden sie automatisch angelegt.
         </p>
     </section>
 </main>
