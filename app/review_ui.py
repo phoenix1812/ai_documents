@@ -3,8 +3,9 @@ Simple FastAPI review UI for AI Documents.
 
 Features:
 - list documents in NEEDS_REVIEW and DRY_RUN
-- show details of one review item
-- approve or reject entries
+- show document context: original title, OCR excerpt, Paperless link
+- show AI metadata: confidence and reason
+- approve/reject entries
 - apply title, correspondent, document type and tags to Paperless
 """
 
@@ -73,6 +74,29 @@ def parse_tags(value: Any) -> list[str]:
     return []
 
 
+def format_confidence(value: Any) -> str:
+    if value is None:
+        return "—"
+
+    try:
+        return f"{float(value) * 100:.0f} %"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def confidence_class(value: Any) -> str:
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return "unknown"
+
+    if confidence >= 0.85:
+        return "high"
+    if confidence >= 0.60:
+        return "medium"
+    return "low"
+
+
 def normalize_item(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None
@@ -80,6 +104,8 @@ def normalize_item(row: sqlite3.Row | None) -> dict[str, Any] | None:
     item = dict(row)
     item["tags_list"] = parse_tags(item.get("tags"))
     item["tags_display"] = ", ".join(item["tags_list"])
+    item["confidence_display"] = format_confidence(item.get("confidence"))
+    item["confidence_class"] = confidence_class(item.get("confidence"))
     return item
 
 
