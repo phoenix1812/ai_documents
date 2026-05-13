@@ -1,17 +1,6 @@
-"""
-Simple FastAPI review UI for AI Documents.
-
-Features:
-- list documents in NEEDS_REVIEW and DRY_RUN
-- show document context: original title, OCR excerpt, Paperless link
-- show AI metadata: confidence and reason
-- approve/reject entries
-- apply title, correspondent, document type and tags to Paperless
-"""
+"""FastAPI Review UI for AI Documents."""
 
 import json
-import sqlite3
-from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Form, HTTPException, Request
@@ -21,63 +10,49 @@ from fastapi.templating import Jinja2Templates
 
 from app.config import settings
 from app.db import (
+    Database,
+    FAILED_STATUSES,
+    REVIEW_STATUSES,
     STATUS_DONE,
     STATUS_DRY_RUN,
+    STATUS_IGNORED,
     STATUS_NEEDS_REVIEW,
 )
 from app.paperless_client import PaperlessClient
+from app.reprocess import reprocess_paperless_document, retry_failed_document
 
-
-DB_FILE = Path(settings.db_path) / "documents.db"
 
 app = FastAPI(title="AI Documents Review UI")
-
 templates = Jinja2Templates(directory="app/templates")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 
-def get_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    return conn
+def get_db() -> Database:
+    return Database(settings.db_path)
 
 
 def parse_tags(value: Any) -> list[str]:
     if value is None:
         return []
-
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
-
     if isinstance(value, str):
         value = value.strip()
         if not value:
             return []
-
         try:
             parsed = json.loads(value)
             if isinstance(parsed, list):
-                return [
-                    str(item).strip()
-                    for item in parsed
-                    if str(item).strip()
-                ]
+                return [str(item).strip() for item in parsed if str(item).strip()]
         except json.JSONDecodeError:
             pass
-
-        return [
-            item.strip()
-            for item in value.split(",")
-            if item.strip()
-        ]
-
+        return [item.strip() for item in value.split(",") if item.strip()]
     return []
 
 
 def format_confidence(value: Any) -> str:
     if value is None:
         return "—"
-
     try:
         return f"{float(value) * 100:.0f} %"
     except (TypeError, ValueError):
@@ -89,7 +64,6 @@ def confidence_class(value: Any) -> str:
         confidence = float(value)
     except (TypeError, ValueError):
         return "unknown"
-
     if confidence >= 0.85:
         return "high"
     if confidence >= 0.60:
@@ -97,11 +71,10 @@ def confidence_class(value: Any) -> str:
     return "low"
 
 
-def normalize_item(row: sqlite3.Row | None) -> dict[str, Any] | None:
-    if row is None:
+def normalize_item(item: dict[str, Any] | None) -> dict[str, Any] | None:
+    if item is None:
         return None
-
-    item = dict(row)
+    item = dict(item)
     item["tags_list"] = parse_tags(item.get("tags"))
     item["tags_display"] = ", ".join(item["tags_list"])
     item["confidence_display"] = format_confidence(item.get("confidence"))
@@ -109,134 +82,39 @@ def normalize_item(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return item
 
 
-def get_review_items(status: str | None = None) -> list[dict[str, Any]]:
-    allowed_statuses = [STATUS_NEEDS_REVIEW, STATUS_DRY_RUN]
-
-    conn = get_connection()
-    try:
-        if status:
-            rows = conn.execute(
-                """
-                SELECT *
-                FROM documents
-                WHERE status = ?
-                ORDER BY processed_at DESC, id DESC
-                LIMIT 100
-                """,
-                (status,),
-            ).fetchall()
-        else:
-            placeholders = ",".join("?" for _ in allowed_statuses)
-            rows = conn.execute(
-                f"""
-                SELECT *
-                FROM documents
-                WHERE status IN ({placeholders})
-                ORDER BY processed_at DESC, id DESC
-                LIMIT 100
-                """,
-                allowed_statuses,
-            ).fetchall()
-
-        return [
-            item
-            for row in rows
-            if (item := normalize_item(row)) is not None
-        ]
-    finally:
-        conn.close()
+def normalize_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [item for raw in items if (item := normalize_item(raw)) is not None]
 
 
-def get_item(item_id: int) -> dict[str, Any]:
-    conn = get_connection()
-    try:
-        row = conn.execute(
-            """
-            SELECT *
-            FROM documents
-            WHERE id = ?
-            """,
-            (item_id,),
-        ).fetchone()
-    finally:
-        conn.close()
-
-    item = normalize_item(row)
+def get_item_or_404(document_db_id: int) -> dict[str, Any]:
+    item = normalize_item(get_db().get_document_row(document_db_id))
     if item is None:
         raise HTTPException(status_code=404, detail="Review item not found")
-
     return item
 
 
-def update_item_status(
-    item_id: int,
-    status: str,
-    error_message: str | None = None,
-) -> None:
-    conn = get_connection()
-    try:
-        result = conn.execute(
-            """
-            UPDATE documents
-            SET status = ?,
-                error_message = ?,
-                processed_at = datetime('now')
-            WHERE id = ?
-            """,
-            (status, error_message, item_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-    if result.rowcount == 0:
-        raise HTTPException(status_code=404, detail="Review item not found")
-
-
-def update_item_values(
-    item_id: int,
-    title: str,
-    correspondent: str,
-    document_type: str,
-    tags: list[str],
-) -> None:
-    conn = get_connection()
-    try:
-        result = conn.execute(
-            """
-            UPDATE documents
-            SET title = ?,
-                correspondent = ?,
-                document_type = ?,
-                tags = ?,
-                processed_at = datetime('now')
-            WHERE id = ?
-            """,
-            (
-                title,
-                correspondent,
-                document_type,
-                json.dumps(tags, ensure_ascii=False),
-                item_id,
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-    if result.rowcount == 0:
-        raise HTTPException(status_code=404, detail="Review item not found")
-
-
 @app.get("/")
-def index(request: Request, status: str | None = None):
-    items = get_review_items(status=status)
+def dashboard(request: Request):
+    db = get_db()
+    return templates.TemplateResponse(
+        "dashboard.html",
+        {
+            "request": request,
+            "counts": db.dashboard_counts(),
+            "recent": normalize_items(db.recent_documents(limit=12)),
+        },
+    )
 
+
+@app.get("/review")
+def review_queue(request: Request, status: str | None = None):
+    db = get_db()
+    items = db.list_by_statuses((status,), limit=100) if status else db.list_by_statuses(REVIEW_STATUSES, limit=100)
     return templates.TemplateResponse(
         "review_list.html",
         {
             "request": request,
-            "items": items,
+            "items": normalize_items(items),
             "selected_status": status,
             "status_needs_review": STATUS_NEEDS_REVIEW,
             "status_dry_run": STATUS_DRY_RUN,
@@ -244,15 +122,19 @@ def index(request: Request, status: str | None = None):
     )
 
 
+@app.get("/failed")
+def failed_queue(request: Request):
+    items = normalize_items(get_db().list_by_statuses(FAILED_STATUSES, limit=100))
+    return templates.TemplateResponse("failed_list.html", {"request": request, "items": items})
+
+
 @app.get("/items/{item_id}")
 def detail(request: Request, item_id: int):
-    item = get_item(item_id)
-
     return templates.TemplateResponse(
         "review_detail.html",
         {
             "request": request,
-            "item": item,
+            "item": get_item_or_404(item_id),
             "status_needs_review": STATUS_NEEDS_REVIEW,
             "status_dry_run": STATUS_DRY_RUN,
         },
@@ -268,38 +150,23 @@ def approve(
     tags: str = Form(""),
     apply_to_paperless: bool = Form(default=False),
 ):
-    item = get_item(item_id)
-
+    db = get_db()
+    item = get_item_or_404(item_id)
     if item["status"] not in {STATUS_NEEDS_REVIEW, STATUS_DRY_RUN}:
-        raise HTTPException(
-            status_code=400,
-            detail="Only NEEDS_REVIEW and DRY_RUN items can be approved",
-        )
+        raise HTTPException(status_code=400, detail="Only review items can be approved")
 
     clean_title = title.strip()
     clean_correspondent = correspondent.strip()
     clean_document_type = document_type.strip()
     tag_list = parse_tags(tags)
-
     if not clean_title:
-        raise HTTPException(
-            status_code=400,
-            detail="Title must not be empty",
-        )
+        raise HTTPException(status_code=400, detail="Title must not be empty")
 
-    update_item_values(
-        item_id=item_id,
-        title=clean_title,
-        correspondent=clean_correspondent,
-        document_type=clean_document_type,
-        tags=tag_list,
-    )
-
+    db.update_document_values(item_id, clean_title, clean_correspondent, clean_document_type, tag_list)
     message = "Approved via Review UI"
 
     if apply_to_paperless:
-        client = PaperlessClient()
-        payload = client.update_document_metadata_by_names(
+        payload = PaperlessClient().update_document_metadata_by_names(
             document_id=int(item["paperless_id"]),
             title=clean_title,
             correspondent=clean_correspondent,
@@ -308,37 +175,94 @@ def approve(
         )
         message = f"Approved via Review UI and applied to Paperless: {payload}"
 
-    update_item_status(
-        item_id=item_id,
-        status=STATUS_DONE,
-        error_message=message,
+    db.insert_review_decision(
+        document_db_id=item_id,
+        paperless_id=int(item["paperless_id"]),
+        action="approved",
+        original_ai_title=item.get("title"),
+        original_ai_correspondent=item.get("correspondent"),
+        original_ai_document_type=item.get("document_type"),
+        original_ai_tags=item.get("tags_list") or [],
+        final_title=clean_title,
+        final_correspondent=clean_correspondent,
+        final_document_type=clean_document_type,
+        final_tags=tag_list,
     )
-
-    return RedirectResponse("/", status_code=303)
+    db.update_status(item_id, STATUS_DONE, message)
+    return RedirectResponse("/review", status_code=303)
 
 
 @app.post("/items/{item_id}/reject")
-def reject(
-    item_id: int,
-    reason: str = Form(default="Manuell abgelehnt"),
-):
-    item = get_item(item_id)
-
+def reject(item_id: int, reason: str = Form(default="Manuell abgelehnt")):
+    db = get_db()
+    item = get_item_or_404(item_id)
     if item["status"] not in {STATUS_NEEDS_REVIEW, STATUS_DRY_RUN}:
-        raise HTTPException(
-            status_code=400,
-            detail="Only NEEDS_REVIEW and DRY_RUN items can be rejected",
+        raise HTTPException(status_code=400, detail="Only review items can be rejected")
+
+    db.insert_review_decision(
+        document_db_id=item_id,
+        paperless_id=int(item["paperless_id"]),
+        action="rejected",
+        original_ai_title=item.get("title"),
+        original_ai_correspondent=item.get("correspondent"),
+        original_ai_document_type=item.get("document_type"),
+        original_ai_tags=item.get("tags_list") or [],
+        final_title=None,
+        final_correspondent=None,
+        final_document_type=None,
+        final_tags=None,
+        reason=reason,
+    )
+    db.update_status(item_id, STATUS_NEEDS_REVIEW, f"Rejected via Review UI: {reason}")
+    return RedirectResponse(f"/items/{item_id}", status_code=303)
+
+
+@app.post("/items/{item_id}/ignore")
+def ignore_failed(item_id: int):
+    db = get_db()
+    item = get_item_or_404(item_id)
+    if item["status"] not in FAILED_STATUSES:
+        raise HTTPException(status_code=400, detail="Only FAILED items can be ignored")
+    db.update_status(item_id, STATUS_IGNORED, "Ignored via Review UI")
+    return RedirectResponse("/failed", status_code=303)
+
+
+@app.post("/items/{item_id}/retry")
+def retry_failed(item_id: int):
+    item = get_item_or_404(item_id)
+    if item["status"] not in FAILED_STATUSES:
+        raise HTTPException(status_code=400, detail="Only FAILED items can be retried")
+    retry_failed_document(item_id)
+    return RedirectResponse("/failed", status_code=303)
+
+
+@app.get("/reprocess")
+def reprocess_form(request: Request):
+    return templates.TemplateResponse("reprocess.html", {"request": request, "result": None, "error": None})
+
+
+@app.post("/reprocess")
+def reprocess_submit(request: Request, paperless_id: int = Form(...)):
+    try:
+        result = reprocess_paperless_document(int(paperless_id))
+        return templates.TemplateResponse(
+            "reprocess.html",
+            {"request": request, "result": f"Paperless-ID {paperless_id} verarbeitet: {result}", "error": None},
+        )
+    except Exception as exc:
+        return templates.TemplateResponse(
+            "reprocess.html",
+            {"request": request, "result": None, "error": str(exc)},
+            status_code=500,
         )
 
-    update_item_status(
-        item_id=item_id,
-        status=STATUS_NEEDS_REVIEW,
-        error_message=f"Rejected via Review UI: {reason}",
-    )
 
-    return RedirectResponse(f"/items/{item_id}", status_code=303)
+@app.get("/learning")
+def learning(request: Request):
+    decisions = get_db().learning_summary(limit=50)
+    return templates.TemplateResponse("learning.html", {"request": request, "decisions": decisions})
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "db": str(DB_FILE)}
+    return {"status": "ok", "db_path": settings.db_path}

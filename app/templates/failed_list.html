@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}Fehler · AI Documents{% endblock %}
+{% block content %}
+<header class="header"><div><h1>Fehler</h1><p>Fehlgeschlagene Dokumente erneut versuchen oder ignorieren.</p></div></header>
+{% if not items %}<section class="empty"><h2>Keine Fehler</h2><p>Aktuell sind keine FAILED-Einträge vorhanden.</p></section>{% else %}
+<section class="panel"><table><thead><tr><th>DB-ID</th><th>Paperless-ID</th><th>Status</th><th>Fehler</th><th>Retries</th><th>Aktion</th></tr></thead><tbody>{% for item in items %}<tr><td><a href="/items/{{ item.id }}">{{ item.id }}</a></td><td>{{ item.paperless_id }}</td><td><span class="badge danger-badge">{{ item.status }}</span></td><td>{{ item.error_message or "—" }}</td><td>{{ item.retry_count or 0 }}</td><td class="row-actions"><form method="post" action="/items/{{ item.id }}/retry"><button class="button success small" type="submit">Erneut versuchen</button></form><form method="post" action="/items/{{ item.id }}/ignore"><button class="button danger small" type="submit">Ignorieren</button></form></td></tr>{% endfor %}</tbody></table></section>{% endif %}
+{% endblock %}
