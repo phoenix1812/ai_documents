@@ -1,8 +1,109 @@
 {% extends "base.html" %}
-{% block title %}Review {{ item.id }} · AI Documents{% endblock %}
+{% block title %}Dokument {{ item.id }} · AI Documents{% endblock %}
 {% block container_class %}wide{% endblock %}
+
 {% block content %}
-<p><a href="/review">← Zurück zur Review-Übersicht</a></p>
-<section class="detail-header"><div><span class="badge">{{ item.status }}</span><h1>{{ item.title or "Ohne Titel" }}</h1><p class="muted">DB-ID {{ item.id }} · Paperless-ID {{ item.paperless_id }}</p></div><div class="header-actions"><span class="confidence big {{ item.confidence_class }}">{{ item.confidence_display }}</span>{% if item.paperless_url %}<a class="button secondary" href="{{ item.paperless_url }}" target="_blank" rel="noopener noreferrer">In Paperless öffnen</a>{% endif %}</div></section>
-<section class="review-layout"><aside class="panel"><h2>Dokumentkontext</h2><dl class="detail-grid single"><div><dt>Originaltitel</dt><dd>{{ item.original_title or "—" }}</dd></div><div><dt>Paperless URL</dt><dd><code>{{ item.paperless_url or "—" }}</code></dd></div><div><dt>Exportpfad</dt><dd>{{ item.export_path or "—" }}</dd></div><div><dt>Hinweis / Validierung</dt><dd>{{ item.error_message or "—" }}</dd></div></dl><h3>OCR-Auszug</h3><pre class="ocr-box">{{ item.ocr_excerpt or "Kein OCR-Auszug vorhanden." }}</pre></aside><section class="panel"><h2>KI-Vorschlag bearbeiten</h2><div class="ai-reason"><strong>KI-Begründung:</strong><p>{{ item.reason or "Keine Begründung gespeichert." }}</p></div>{% if item.status in [status_needs_review, status_dry_run] %}<form method="post" action="/items/{{ item.id }}/approve" class="edit-form"><label>Titel<input type="text" name="title" value="{{ item.title or '' }}" required></label><label>Korrespondent<input type="text" name="correspondent" value="{{ item.correspondent or '' }}"></label><label>Dokumenttyp<input type="text" name="document_type" value="{{ item.document_type or '' }}"></label><label>Tags, kommagetrennt<input type="text" name="tags" value="{{ item.tags_display or '' }}"></label><label class="checkbox"><input type="checkbox" name="apply_to_paperless" value="true" checked>Nach Paperless übernehmen</label><button class="button success" type="submit">Freigeben und speichern</button></form><form method="post" action="/items/{{ item.id }}/reject" class="reject-form"><label>Ablehnungsgrund<input type="text" name="reason" value="Falsche Klassifizierung"></label><button class="button danger" type="submit">Ablehnen</button></form>{% else %}<p class="notice">Dieser Eintrag ist nicht im Review-Status.</p>{% endif %}</section></section>
+<p><a href="/documents">← Zurück zur Dokumentübersicht</a></p>
+
+<section class="detail-header">
+    <div>
+        <span class="badge">{{ item.status }}</span>
+        <h1>{{ item.title or "Ohne Titel" }}</h1>
+        <p class="muted">DB-ID {{ item.id }} · Paperless-ID {{ item.paperless_id }}</p>
+    </div>
+
+    <div class="header-actions">
+        <span class="confidence big {{ item.confidence_class }}">{{ item.confidence_display }}</span>
+        {% if item.paperless_url %}
+            <a class="button secondary" href="{{ item.paperless_url }}" target="_blank" rel="noopener noreferrer">
+                In Paperless öffnen
+            </a>
+        {% endif %}
+    </div>
+</section>
+
+<section class="review-layout">
+    <aside class="panel">
+        <h2>Dokumentkontext</h2>
+
+        <dl class="detail-grid single">
+            <div>
+                <dt>Originaltitel</dt>
+                <dd>{{ item.original_title or "—" }}</dd>
+            </div>
+            <div>
+                <dt>Paperless URL</dt>
+                <dd><code>{{ item.paperless_url or "—" }}</code></dd>
+            </div>
+            <div>
+                <dt>Exportpfad</dt>
+                <dd>{{ item.export_path or "—" }}</dd>
+            </div>
+            <div>
+                <dt>Hinweis / Statusmeldung</dt>
+                <dd>{{ item.error_message or "—" }}</dd>
+            </div>
+        </dl>
+
+        <h3>OCR-Auszug</h3>
+        <pre class="ocr-box">{{ item.ocr_excerpt or "Kein OCR-Auszug vorhanden." }}</pre>
+    </aside>
+
+    <section class="panel">
+        <h2>Metadaten bearbeiten</h2>
+
+        <div class="ai-reason">
+            <strong>KI-Begründung:</strong>
+            <p>{{ item.reason or "Keine Begründung gespeichert." }}</p>
+        </div>
+
+        {% if item.is_editable %}
+            <form method="post" action="/items/{{ item.id }}/save" class="edit-form">
+                <label>
+                    Titel
+                    <input type="text" name="title" value="{{ item.title or '' }}" required>
+                </label>
+
+                <label>
+                    Korrespondent
+                    <input type="text" name="correspondent" value="{{ item.correspondent or '' }}">
+                </label>
+
+                <label>
+                    Dokumenttyp
+                    <input type="text" name="document_type" value="{{ item.document_type or '' }}">
+                </label>
+
+                <label>
+                    Tags, kommagetrennt
+                    <input type="text" name="tags" value="{{ item.tags_display or '' }}">
+                </label>
+
+                <label>
+                    Korrekturgrund
+                    <input type="text" name="correction_reason" value="Manuelle Korrektur">
+                </label>
+
+                <label class="checkbox">
+                    <input type="checkbox" name="apply_to_paperless" value="true" checked>
+                    Nach Paperless übernehmen
+                </label>
+
+                <button class="button success" type="submit">Speichern</button>
+            </form>
+
+            {% if item.status in review_statuses %}
+                <form method="post" action="/items/{{ item.id }}/reject" class="reject-form">
+                    <label>
+                        Ablehnungsgrund
+                        <input type="text" name="reason" value="Falsche Klassifizierung">
+                    </label>
+                    <button class="button danger" type="submit">Ablehnen</button>
+                </form>
+            {% endif %}
+        {% else %}
+            <p class="notice">Dieser Eintrag ist nicht editierbar.</p>
+        {% endif %}
+    </section>
+</section>
 {% endblock %}

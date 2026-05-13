@@ -76,10 +76,10 @@ services:
       AI_WORKER_TRIGGER_URL: http://ai-worker:8080/process
 
     volumes:
-      - ./data/data:/usr/src/paperless/data
-      - ./media:/usr/src/paperless/media
-      - ./consume:/usr/src/paperless/consume
-      - ./export:/usr/src/paperless/export
+      - ~/paperless-consume:/usr/src/paperless/consume
+      - ./paperless-data:/usr/src/paperless/data
+      - /Volumes/homes/waldi/Drive/Dokumente/paperless/media:/usr/src/paperless/media
+      - /Volumes/homes/waldi/Drive/Dokumente/paperless/export:/usr/src/paperless/export
       - ./scripts:/usr/src/paperless/scripts:ro
 
   # -------------------------

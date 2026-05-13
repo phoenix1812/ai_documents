@@ -1,16 +1,13 @@
 """
 Robust SQLite database layer for AI Documents.
 
-Goals:
-- track processed Paperless documents
-- store AI classification suggestions
-- support review UI, retry queue and learning history
-- be safer when worker and review UI access SQLite in parallel
-
-Important SQLite settings:
-- WAL mode improves concurrent reads/writes
-- busy_timeout prevents immediate "database is locked" errors
-- autocommit is avoided; changes are committed explicitly
+Supports:
+- document tracking
+- review UI
+- audit/history view
+- manual corrections of already approved documents
+- retry/reprocess
+- review-learning log
 """
 
 from __future__ import annotations
@@ -23,12 +20,15 @@ from typing import Any
 
 
 STATUS_DONE = "DONE"
+STATUS_AUTO_APPROVED = "AUTO_APPROVED"
+STATUS_MANUALLY_APPROVED = "MANUALLY_APPROVED"
 STATUS_FAILED = "FAILED"
 STATUS_FAILED_OCR = "FAILED_OCR"
 STATUS_FAILED_LLM = "FAILED_LLM"
 STATUS_FAILED_EXPORT = "FAILED_EXPORT"
 STATUS_FAILED_API = "FAILED_API"
 STATUS_NEEDS_REVIEW = "NEEDS_REVIEW"
+STATUS_REVIEW_REQUIRED = "REVIEW_REQUIRED"
 STATUS_SKIPPED_DUPLICATE = "SKIPPED_DUPLICATE"
 STATUS_DRY_RUN = "DRY_RUN"
 STATUS_IGNORED = "IGNORED"
@@ -43,21 +43,29 @@ FAILED_STATUSES = (
 
 REVIEW_STATUSES = (
     STATUS_NEEDS_REVIEW,
+    STATUS_REVIEW_REQUIRED,
     STATUS_DRY_RUN,
+)
+
+APPROVED_STATUSES = (
+    STATUS_DONE,
+    STATUS_AUTO_APPROVED,
+    STATUS_MANUALLY_APPROVED,
 )
 
 FINAL_STATUSES = (
     STATUS_DONE,
+    STATUS_AUTO_APPROVED,
+    STATUS_MANUALLY_APPROVED,
     STATUS_SKIPPED_DUPLICATE,
     STATUS_NEEDS_REVIEW,
+    STATUS_REVIEW_REQUIRED,
     STATUS_DRY_RUN,
     STATUS_IGNORED,
 )
 
 
 class Database:
-    """Small explicit SQLite wrapper."""
-
     def __init__(self, db_path: str) -> None:
         Path(db_path).mkdir(parents=True, exist_ok=True)
         self.db_file = Path(db_path) / "documents.db"
@@ -73,7 +81,6 @@ class Database:
         self._init_db()
 
     def _configure_sqlite(self) -> None:
-        """Make SQLite more robust for worker + UI parallel access."""
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA busy_timeout=30000")
         self.conn.execute("PRAGMA foreign_keys=ON")
@@ -112,11 +119,7 @@ class Database:
             except json.JSONDecodeError:
                 pass
 
-            return [
-                item.strip()
-                for item in value.split(",")
-                if item.strip()
-            ]
+            return [item.strip() for item in value.split(",") if item.strip()]
 
         return []
 
@@ -382,13 +385,46 @@ class Database:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_documents(
+        self,
+        status: str | None = None,
+        query: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM documents"
+        params: list[Any] = []
+        where: list[str] = []
+
+        if status:
+            where.append("status = ?")
+            params.append(status)
+
+        if query:
+            like = f"%{query.strip()}%"
+            where.append("""
+                (
+                    title LIKE ?
+                    OR original_title LIKE ?
+                    OR correspondent LIKE ?
+                    OR document_type LIKE ?
+                    OR tags LIKE ?
+                    OR CAST(paperless_id AS TEXT) LIKE ?
+                )
+            """)
+            params.extend([like, like, like, like, like, like])
+
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+
+        sql += " ORDER BY processed_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+
+        rows = self.conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
     def get_document_row(self, document_db_id: int) -> dict[str, Any] | None:
         row = self.conn.execute(
-            """
-            SELECT *
-            FROM documents
-            WHERE id = ?
-            """,
+            "SELECT * FROM documents WHERE id = ?",
             (document_db_id,),
         ).fetchone()
         return self.row_to_dict(row)
@@ -488,11 +524,7 @@ class Database:
             ORDER BY status
             """
         ).fetchall()
-
-        return {
-            row["status"] or "UNKNOWN": int(row["count"])
-            for row in rows
-        }
+        return {row["status"] or "UNKNOWN": int(row["count"]) for row in rows}
 
     def recent_documents(self, limit: int = 10) -> list[dict[str, Any]]:
         rows = self.conn.execute(

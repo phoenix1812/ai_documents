@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Dokumente · AI Documents{% endblock %}
+
+{% block content %}
+<header class="header">
+    <div>
+        <h1>{{ headline or "Alle Dokumente" }}</h1>
+        <p>{{ subline or "Audit-Ansicht: auch automatisch freigegebene Dokumente können nachträglich bearbeitet werden." }}</p>
+    </div>
+</header>
+
+<section class="panel">
+    <form method="get" action="/documents" class="filter-form">
+        <label>
+            Suche
+            <input type="text" name="q" value="{{ query }}" placeholder="Titel, Korrespondent, Tag, Paperless-ID">
+        </label>
+
+        <label>
+            Status
+            <select name="status">
+                <option value="">Alle</option>
+                {% for status in status_filters %}
+                    <option value="{{ status }}" {% if selected_status == status %}selected{% endif %}>{{ status }}</option>
+                {% endfor %}
+            </select>
+        </label>
+
+        <button class="button" type="submit">Filtern</button>
+        <a class="button secondary" href="/documents">Zurücksetzen</a>
+    </form>
+</section>
+
+{% if not items %}
+    <section class="empty">
+        <h2>Keine Dokumente gefunden</h2>
+    </section>
+{% else %}
+    <section class="panel">
+        <table>
+            <thead>
+                <tr>
+                    <th>DB-ID</th>
+                    <th>Paperless</th>
+                    <th>Status</th>
+                    <th>Titel</th>
+                    <th>Typ</th>
+                    <th>Korrespondent</th>
+                    <th>Tags</th>
+                    <th>Confidence</th>
+                    <th>Aktion</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in items %}
+                    <tr>
+                        <td><a href="/items/{{ item.id }}">{{ item.id }}</a></td>
+                        <td>{{ item.paperless_id }}</td>
+                        <td><span class="badge">{{ item.status }}</span></td>
+                        <td>{{ item.title or item.original_title or "—" }}</td>
+                        <td>{{ item.document_type or "—" }}</td>
+                        <td>{{ item.correspondent or "—" }}</td>
+                        <td>{{ item.tags_display or "—" }}</td>
+                        <td><span class="confidence {{ item.confidence_class }}">{{ item.confidence_display }}</span></td>
+                        <td><a class="button small" href="/items/{{ item.id }}">Bearbeiten</a></td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </section>
+{% endif %}
+{% endblock %}

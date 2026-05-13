@@ -1,11 +1,5 @@
 """
-Document processing pipeline:
-- Paperless ingestion
-- OCR text classification via Ollama
-- validation of LLM output
-- duplicate detection via SQLite
-- final export or review export
-- Paperless metadata update
+Document processing pipeline.
 """
 
 import json
@@ -15,6 +9,7 @@ import requests
 
 from app.config import settings
 from app.db import Database
+from app.db import STATUS_AUTO_APPROVED
 from app.db import STATUS_DRY_RUN
 from app.db import STATUS_FAILED_API
 from app.db import STATUS_FAILED_EXPORT
@@ -33,24 +28,16 @@ logger = logging.getLogger(__name__)
 
 
 def build_ocr_excerpt(content: str, max_length: int = 3000) -> str:
-    """
-    Create a compact OCR excerpt for review.
-
-    Keeps the beginning of the OCR text because document sender,
-    title, invoice number and date are usually near the top.
-    """
     cleaned = " ".join(content.split())
     return cleaned[:max_length]
 
 
 def build_paperless_document_url(document_id: int) -> str:
-    """Build a direct Paperless document URL for browser review."""
-    base_url = settings.paperless_public_url.rstrip("/")
+    base_url = getattr(settings, "paperless_public_url", settings.paperless_url).rstrip("/")
     return f"{base_url}/documents/{document_id}/details"
 
 
 def get_result_confidence(result) -> float | None:
-    """Read confidence from the model result if present."""
     value = getattr(result, "confidence", None)
     if value is None:
         return None
@@ -62,7 +49,6 @@ def get_result_confidence(result) -> float | None:
 
 
 def get_result_reason(result) -> str | None:
-    """Read classification reason from the model result if present."""
     value = getattr(result, "reason", None)
     if value is None:
         return None
@@ -77,11 +63,7 @@ class DocumentClassifier:
         self.exporter = Exporter()
         self.db = Database(settings.db_path)
 
-    def _write_bytes(
-        self,
-        target_file,
-        file_bytes: bytes,
-    ) -> None:
+    def _write_bytes(self, target_file, file_bytes: bytes) -> None:
         with open(target_file, "wb") as f:
             f.write(file_bytes)
 
@@ -101,7 +83,6 @@ class DocumentClassifier:
         ocr_excerpt: str | None,
         paperless_url: str | None,
     ) -> str:
-        """Export document to _REVIEW and persist NEEDS_REVIEW state."""
         filename = self.exporter.build_review_filename(
             document_id=document_id,
             file_hash=file_hash,
@@ -153,9 +134,7 @@ class DocumentClassifier:
         try:
             self.paperless.update_document(
                 document_id=document_id,
-                payload={
-                    "title": f"[Review] {title or 'Unklassifiziertes Dokument'}",
-                },
+                payload={"title": f"[Review] {title or 'Unklassifiziertes Dokument'}"},
             )
         except requests.RequestException:
             logger.exception(
@@ -163,36 +142,17 @@ class DocumentClassifier:
                 document_id,
             )
 
-        logger.warning(
-            "Document %s moved to review: %s -> %s",
-            document_id,
-            reason_text,
-            target_file,
-        )
-
         return STATUS_NEEDS_REVIEW
 
     def process_document(self, document_id: int) -> str:
-        """
-        Process one Paperless document.
-
-        Deduplication is based on file hash.
-        Processing state is persisted in SQLite.
-        Documents with unsafe classification results are sent to _REVIEW.
-        """
         file_hash = ""
 
         try:
-            file_bytes = self.paperless.download_document(
-                document_id=document_id,
-            )
+            file_bytes = self.paperless.download_document(document_id=document_id)
             file_hash = sha256(file_bytes)
 
             if self.db.exists_hash(file_hash):
-                logger.info(
-                    "Duplicate skipped by hash: %s",
-                    document_id,
-                )
+                logger.info("Duplicate skipped by hash: %s", document_id)
                 self.db.insert_document(
                     paperless_id=document_id,
                     file_hash=f"{file_hash}-{document_id}-duplicate",
@@ -213,10 +173,6 @@ class DocumentClassifier:
             ocr_excerpt = build_ocr_excerpt(content)
 
             if not content:
-                logger.warning(
-                    "No OCR content: %s",
-                    document_id,
-                )
                 self.db.insert_document(
                     paperless_id=document_id,
                     file_hash=file_hash,
@@ -258,7 +214,6 @@ class DocumentClassifier:
 
             confidence = get_result_confidence(result)
             reason = get_result_reason(result)
-
             validation = validate_classification(result)
 
             if not validation.valid:
@@ -327,18 +282,6 @@ class DocumentClassifier:
                     status=STATUS_DRY_RUN,
                     error_message="Dry run: Paperless metadata was not updated.",
                 )
-
-                logger.info(
-                    "[DRY RUN] Would update document %s with title=%s, "
-                    "correspondent=%s, document_type=%s, tags=%s, confidence=%s",
-                    document_id,
-                    result.title,
-                    result.correspondent,
-                    result.document_type,
-                    result.tags,
-                    confidence,
-                )
-
                 return STATUS_DRY_RUN
 
             applied_payload = self.paperless.update_document_metadata_by_names(
@@ -362,16 +305,11 @@ class DocumentClassifier:
                 ocr_excerpt=ocr_excerpt,
                 paperless_url=paperless_url,
                 export_path=str(target_file),
-                status="DONE",
-                error_message=f"Applied to Paperless: {applied_payload}",
+                status=STATUS_AUTO_APPROVED,
+                error_message=f"Auto-approved and applied to Paperless: {applied_payload}",
             )
 
-            logger.info(
-                "Exported and updated Paperless metadata: %s",
-                target_file,
-            )
-
-            return "DONE"
+            return STATUS_AUTO_APPROVED
 
         except requests.RequestException as exc:
             self.db.mark_failed(
