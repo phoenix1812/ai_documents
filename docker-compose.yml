@@ -1,5 +1,4 @@
 services:
-
   # -------------------------
   # REDIS
   # -------------------------
@@ -18,7 +17,7 @@ services:
     environment:
       POSTGRES_DB: paperless
       POSTGRES_USER: paperless
-      POSTGRES_PASSWORD: paperless
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-paperless}
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
 
@@ -41,45 +40,33 @@ services:
     image: ghcr.io/paperless-ngx/paperless-ngx:latest
     container_name: paperless
     restart: unless-stopped
-
     depends_on:
       - redis
       - db
       - ai-worker
-
     ports:
       - "8000:8000"
-
     environment:
       PAPERLESS_REDIS: redis://redis:6379
       PAPERLESS_DBHOST: db
-
       PAPERLESS_TIME_ZONE: Europe/Berlin
-
       PAPERLESS_OCR_LANGUAGE: deu+eng
       PAPERLESS_OCR_LANGUAGES: deu eng
-
-      PAPERLESS_ADMIN_USER: admin
-      PAPERLESS_ADMIN_PASSWORD: changeme
-
+      PAPERLESS_ADMIN_USER: ${PAPERLESS_ADMIN_USER:-admin}
+      PAPERLESS_ADMIN_PASSWORD: ${PAPERLESS_ADMIN_PASSWORD:-changeme}
       PAPERLESS_CONSUMER_POLLING: 5
-
       PAPERLESS_FILENAME_FORMAT: >
         {{ created_year }}/{{ correspondent }}/{{ document_type }}/{{ title }}
-
       PAPERLESS_OCR_ROTATE_PAGES: true
       PAPERLESS_OCR_DESKEW: true
       PAPERLESS_OCR_CLEAN: clean
-
       # Event-driven AI trigger after Paperless has consumed a document.
       PAPERLESS_POST_CONSUME_SCRIPT: /usr/src/paperless/scripts/post-consume-ai-worker.sh
       AI_WORKER_TRIGGER_URL: http://ai-worker:8080/process
-
     volumes:
       - ~/paperless-consume:/usr/src/paperless/consume
       - ./paperless-data:/usr/src/paperless/data
       - /Volumes/homes/waldi/Drive/Dokumente/paperless/media:/usr/src/paperless/media
-      - /Volumes/homes/waldi/Drive/Dokumente/paperless/export:/usr/src/paperless/export
       - ./scripts:/usr/src/paperless/scripts:ro
 
   # -------------------------
@@ -89,22 +76,17 @@ services:
     build: .
     container_name: ai-worker
     restart: unless-stopped
-
     depends_on:
       - ollama
-
     env_file:
       - .env
-
     environment:
       OLLAMA_URL: http://ollama:11434
       PAPERLESS_URL: http://paperless:8000
       TRIGGER_PORT: 8080
-
     volumes:
-      - ./export:/exports
       - ./data:/data
-  
+
   ai-review-ui:
     build: .
     container_name: ai-review-ui
@@ -121,9 +103,6 @@ services:
     ports:
       - "8090:8090"
     volumes:
-      - ./export:/exports
       - ./data:/data
     command: >
-      uvicorn app.review_ui:app
-      --host 0.0.0.0
-      --port 8090
+      uvicorn app.review_ui:app --host 0.0.0.0 --port 8090

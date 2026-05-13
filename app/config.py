@@ -1,7 +1,7 @@
 """Central configuration loader.
 
-All values are read from environment variables so the application can be
-configured differently for local development, Docker Compose and production.
+All values are read from environment variables so the application can be configured
+for local development, Docker Compose and production.
 """
 
 import os
@@ -16,12 +16,10 @@ class Settings:
             "PAPERLESS_URL",
             "http://localhost:8000",
         )
-
         self.paperless_public_url = os.getenv(
             "PAPERLESS_PUBLIC_URL",
             self.paperless_url,
         ).rstrip("/")
-        
         self.paperless_token = os.getenv(
             "PAPERLESS_TOKEN",
             "",
@@ -38,10 +36,6 @@ class Settings:
         )
 
         # Paths
-        self.export_path = os.getenv(
-            "EXPORT_PATH",
-            "/exports",
-        )
         self.db_path = os.getenv(
             "DB_PATH",
             "/data",
@@ -62,7 +56,7 @@ class Settings:
         )
 
         # Safety
-        # When enabled, the system exports and stores the classification result,
+        # When enabled, the system stores the classification result,
         # but does not write metadata back to Paperless.
         self.dry_run = os.getenv(
             "DRY_RUN",
@@ -89,8 +83,7 @@ class Settings:
                 "REVIEW_UI_PORT",
                 "8090",
             )
-)
-
+        )
 
 
 settings = Settings()

@@ -1,5 +1,8 @@
-"""
-Document processing pipeline.
+"""Document processing pipeline.
+
+Paperless is the single source of truth.
+The AI worker only updates Paperless metadata and stores an audit/status log in SQLite.
+It does not export or copy PDF files anymore.
 """
 
 import json
@@ -12,19 +15,18 @@ from app.db import Database
 from app.db import STATUS_AUTO_APPROVED
 from app.db import STATUS_DRY_RUN
 from app.db import STATUS_FAILED_API
-from app.db import STATUS_FAILED_EXPORT
 from app.db import STATUS_FAILED_LLM
 from app.db import STATUS_FAILED_OCR
 from app.db import STATUS_NEEDS_REVIEW
 from app.db import STATUS_SKIPPED_DUPLICATE
-from app.exporter import Exporter
 from app.hash_store import sha256
 from app.ollama_client import OllamaClient
 from app.paperless_client import PaperlessClient
 from app.validator import validate_classification
 
-
 logger = logging.getLogger(__name__)
+
+REVIEW_TAG = "needs-ai-review"
 
 
 def build_ocr_excerpt(content: str, max_length: int = 3000) -> str:
@@ -41,7 +43,6 @@ def get_result_confidence(result) -> float | None:
     value = getattr(result, "confidence", None)
     if value is None:
         return None
-
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -52,26 +53,41 @@ def get_result_reason(result) -> str | None:
     value = getattr(result, "reason", None)
     if value is None:
         return None
-
     return str(value).strip() or None
+
+
+def add_unique_tag(tags: list[str] | None, tag: str) -> list[str]:
+    """Return tags with tag appended once, case-insensitively."""
+    result: list[str] = []
+    seen: set[str] = set()
+
+    for value in tags or []:
+        clean_value = str(value).strip()
+        if not clean_value:
+            continue
+        key = clean_value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(clean_value)
+
+    clean_tag = tag.strip()
+    if clean_tag and clean_tag.lower() not in seen:
+        result.append(clean_tag)
+
+    return result
 
 
 class DocumentClassifier:
     def __init__(self) -> None:
         self.paperless = PaperlessClient()
         self.ollama = OllamaClient()
-        self.exporter = Exporter()
         self.db = Database(settings.db_path)
-
-    def _write_bytes(self, target_file, file_bytes: bytes) -> None:
-        with open(target_file, "wb") as f:
-            f.write(file_bytes)
 
     def _send_to_review(
         self,
         document_id: int,
         file_hash: str,
-        file_bytes: bytes,
         title: str,
         correspondent: str,
         document_type: str,
@@ -83,58 +99,26 @@ class DocumentClassifier:
         ocr_excerpt: str | None,
         paperless_url: str | None,
     ) -> str:
-        filename = self.exporter.build_review_filename(
-            document_id=document_id,
-            file_hash=file_hash,
-            reasons=reasons,
-        )
-        target_file = self.exporter.review_export_path(filename)
-        target_file = self.exporter.unique_path(target_file)
+        """Mark a document for review in Paperless and store an audit row.
+
+        No PDF is exported. Paperless remains the source of truth.
+        """
+        reason_text = ", ".join(reasons)
+        review_tags = add_unique_tag(tags, REVIEW_TAG)
+        review_title = title or original_title or "Unklassifiziertes Dokument"
 
         try:
-            self._write_bytes(target_file, file_bytes)
-        except OSError as exc:
-            self.db.insert_document(
-                paperless_id=document_id,
-                file_hash=file_hash,
-                title=title,
+            applied_payload = self.paperless.update_document_metadata_by_names(
+                document_id=document_id,
+                title=f"[Review] {review_title}",
                 correspondent=correspondent,
                 document_type=document_type,
-                tags=tags,
-                confidence=confidence,
-                reason=reason,
-                original_title=original_title,
-                ocr_excerpt=ocr_excerpt,
-                paperless_url=paperless_url,
-                export_path=str(target_file),
-                status=STATUS_FAILED_EXPORT,
-                error_message=str(exc),
+                tags=review_tags,
             )
-            return STATUS_FAILED_EXPORT
-
-        reason_text = ", ".join(reasons)
-
-        self.db.insert_document(
-            paperless_id=document_id,
-            file_hash=file_hash,
-            title=title,
-            correspondent=correspondent,
-            document_type=document_type,
-            tags=tags,
-            confidence=confidence,
-            reason=reason,
-            original_title=original_title,
-            ocr_excerpt=ocr_excerpt,
-            paperless_url=paperless_url,
-            export_path=str(target_file),
-            status=STATUS_NEEDS_REVIEW,
-            error_message=reason_text,
-        )
-
-        try:
-            self.paperless.update_document(
-                document_id=document_id,
-                payload={"title": f"[Review] {title or 'Unklassifiziertes Dokument'}"},
+            logger.info(
+                "Paperless review metadata updated for document %s: %s",
+                document_id,
+                applied_payload,
             )
         except requests.RequestException:
             logger.exception(
@@ -142,12 +126,31 @@ class DocumentClassifier:
                 document_id,
             )
 
+        self.db.insert_document(
+            paperless_id=document_id,
+            file_hash=file_hash,
+            title=review_title,
+            correspondent=correspondent,
+            document_type=document_type,
+            tags=review_tags,
+            confidence=confidence,
+            reason=reason,
+            original_title=original_title,
+            ocr_excerpt=ocr_excerpt,
+            paperless_url=paperless_url,
+            export_path="",
+            status=STATUS_NEEDS_REVIEW,
+            error_message=reason_text,
+        )
+
         return STATUS_NEEDS_REVIEW
 
     def process_document(self, document_id: int) -> str:
         file_hash = ""
 
         try:
+            # Download is only used for an exact binary duplicate hash.
+            # The PDF is not stored outside Paperless.
             file_bytes = self.paperless.download_document(document_id=document_id)
             file_hash = sha256(file_bytes)
 
@@ -220,7 +223,6 @@ class DocumentClassifier:
                 return self._send_to_review(
                     document_id=document_id,
                     file_hash=file_hash,
-                    file_bytes=file_bytes,
                     title=result.title,
                     correspondent=result.correspondent,
                     document_type=result.document_type,
@@ -232,38 +234,6 @@ class DocumentClassifier:
                     ocr_excerpt=ocr_excerpt,
                     paperless_url=paperless_url,
                 )
-
-            filename = self.exporter.build_filename(
-                title=result.title,
-                tags=result.tags,
-            )
-            target_file = self.exporter.export_path(
-                document_type=result.document_type,
-                correspondent=result.correspondent,
-                filename=filename,
-            )
-            target_file = self.exporter.unique_path(target_file)
-
-            try:
-                self._write_bytes(target_file, file_bytes)
-            except OSError as exc:
-                self.db.insert_document(
-                    paperless_id=document_id,
-                    file_hash=file_hash,
-                    title=result.title,
-                    correspondent=result.correspondent,
-                    document_type=result.document_type,
-                    tags=result.tags,
-                    confidence=confidence,
-                    reason=reason,
-                    original_title=original_title,
-                    ocr_excerpt=ocr_excerpt,
-                    paperless_url=paperless_url,
-                    export_path=str(target_file),
-                    status=STATUS_FAILED_EXPORT,
-                    error_message=str(exc),
-                )
-                return STATUS_FAILED_EXPORT
 
             if settings.dry_run:
                 self.db.insert_document(
@@ -278,7 +248,7 @@ class DocumentClassifier:
                     original_title=original_title,
                     ocr_excerpt=ocr_excerpt,
                     paperless_url=paperless_url,
-                    export_path=str(target_file),
+                    export_path="",
                     status=STATUS_DRY_RUN,
                     error_message="Dry run: Paperless metadata was not updated.",
                 )
@@ -304,7 +274,7 @@ class DocumentClassifier:
                 original_title=original_title,
                 ocr_excerpt=ocr_excerpt,
                 paperless_url=paperless_url,
-                export_path=str(target_file),
+                export_path="",
                 status=STATUS_AUTO_APPROVED,
                 error_message=f"Auto-approved and applied to Paperless: {applied_payload}",
             )

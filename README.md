@@ -1,9 +1,9 @@
 # AI Documents
 
-AI Documents ist ein lokaler, eventbasierter Dokumenten-Klassifizierer für **paperless-ngx**.  
-Nach dem Import eines Dokuments ruft Paperless einen Post-Consume-Hook auf. Dieser triggert einen kleinen Python-HTTP-Service, der das Dokument aus Paperless lädt, den OCR-Text mit **Ollama** klassifiziert, das Ergebnis validiert und die PDF-Datei strukturiert exportiert.
+AI Documents ist ein lokaler, eventbasierter Dokumenten-Klassifizierer für **paperless-ngx**.
+Nach dem Import eines Dokuments ruft Paperless einen Post-Consume-Hook auf. Dieser triggert einen kleinen Python-HTTP-Service, der das Dokument aus Paperless lädt, den OCR-Text mit **Ollama** klassifiziert, das Ergebnis validiert und die Metadaten direkt in Paperless schreibt.
 
-Das Ziel: Dokumente automatisch, lokal und ohne Cloud-Kosten vorsortieren.
+**Paperless ist die Single Source of Truth.** PDFs werden nicht mehr in einen separaten Exportordner kopiert.
 
 ---
 
@@ -11,13 +11,13 @@ Das Ziel: Dokumente automatisch, lokal und ohne Cloud-Kosten vorsortieren.
 
 - Eventbasierte Verarbeitung über Paperless `POST_CONSUME_SCRIPT`
 - Lokale LLM-Klassifizierung über Ollama
-- Strukturierter Export nach Dokumenttyp und Korrespondent
-- Review-Ordner für unsichere Klassifizierungen
+- Schreibt Titel, Korrespondent, Dokumenttyp und Tags direkt nach Paperless
+- Review-Markierung über Paperless-Tag `needs-ai-review`
 - Duplikaterkennung per SHA256-Dateihash
 - Persistenter Verarbeitungsstatus in SQLite
 - Docker-Compose-Setup mit Paperless, PostgreSQL, Redis, Ollama und AI-Worker
 - Minimaler Healthcheck-Endpunkt
-- Basistest für das Klassifizierungsmodell
+- Review UI für Korrekturen und erneutes Anwenden auf Paperless
 
 ---
 
@@ -25,27 +25,26 @@ Das Ziel: Dokumente automatisch, lokal und ohne Cloud-Kosten vorsortieren.
 
 ```text
 paperless-ngx
-    |
-    | post-consume script
-    v
+  |
+  | post-consume script
+  v
 scripts/post-consume-ai-worker.sh
-    |
-    | POST /process {"document_id": ...}
-    v
+  |
+  | POST /process {"document_id": ...}
+  v
 app/main.py
-    |
-    v
+  |
+  v
 app/worker.py
-    |
-    v
+  |
+  v
 app/classifier.py
-    |
-    +--> Paperless API: Dokument + OCR + PDF laden
-    +--> SHA256: Duplikate erkennen
-    +--> Ollama: OCR-Text klassifizieren
-    +--> Validator: Ergebnis prüfen
-    +--> Exporter: PDF speichern
-    +--> SQLite: Status protokollieren
+  |--> Paperless API: Dokument + OCR + PDF-Download nur für Hash laden
+  |--> SHA256: Duplikate erkennen
+  |--> Ollama: OCR-Text klassifizieren
+  |--> Validator: Ergebnis prüfen
+  |--> Paperless API: Metadaten aktualisieren
+  |--> SQLite: Status protokollieren
 ```
 
 ---
@@ -61,7 +60,6 @@ app/classifier.py
 │   ├── paperless_client.py  # Paperless-ngx API Client
 │   ├── ollama_client.py     # Ollama Client
 │   ├── validator.py         # Validierung der LLM-Ergebnisse
-│   ├── exporter.py          # Exportpfade und Dateinamen
 │   ├── db.py                # SQLite-Statusdatenbank
 │   ├── models.py            # Pydantic-Modelle
 │   ├── prompts.py           # System- und User-Prompts
@@ -81,7 +79,7 @@ app/classifier.py
 
 - Docker und Docker Compose
 - Ein lokal lauffähiges Ollama-Modell
-- Ausreichend Speicherplatz für Paperless, Export und Ollama-Modelle
+- Ausreichend Speicherplatz für Paperless und Ollama-Modelle
 
 Empfohlenes Modell für den Start:
 
@@ -95,37 +93,37 @@ Alternativ kannst du kleinere oder spezialisierte Modelle verwenden, z. B. `llam
 
 ## Konfiguration
 
-Lege im Projektverzeichnis eine `.env` Datei an:
+Lege im Projektverzeichnis eine `.env` Datei an. Als Vorlage kannst du `.env.example` verwenden:
 
 ```env
 PAPERLESS_URL=http://paperless:8000
+PAPERLESS_PUBLIC_URL=http://localhost:8000
 PAPERLESS_TOKEN=DEIN_PAPERLESS_API_TOKEN
-
 OLLAMA_URL=http://ollama:11434
 OLLAMA_MODEL=llama3
-
-EXPORT_PATH=/exports
 DB_PATH=/data
-
 CONFIDENCE_THRESHOLD=0.75
 MIN_TITLE_LENGTH=8
-
 TRIGGER_PORT=8080
+REVIEW_UI_PORT=8090
+DRY_RUN=false
 ```
 
 ### Wichtige Variablen
 
 | Variable | Beschreibung | Standard |
 |---|---|---|
-| `PAPERLESS_URL` | URL der Paperless-Instanz | `http://localhost:8000` |
+| `PAPERLESS_URL` | Interne URL der Paperless-Instanz | `http://localhost:8000` |
+| `PAPERLESS_PUBLIC_URL` | URL für Links in der Review UI | Wert von `PAPERLESS_URL` |
 | `PAPERLESS_TOKEN` | Paperless API Token | leer |
 | `OLLAMA_URL` | Ollama API URL | `http://ollama:11434` |
 | `OLLAMA_MODEL` | Modell für Klassifizierung | `llama3` |
-| `EXPORT_PATH` | Zielordner für exportierte PDFs | `/exports` |
 | `DB_PATH` | Pfad für SQLite-Datenbank | `/data` |
-| `CONFIDENCE_THRESHOLD` | Mindestvertrauen für Auto-Export | `0.75` |
+| `CONFIDENCE_THRESHOLD` | Mindestvertrauen für Auto-Approval | `0.75` |
 | `MIN_TITLE_LENGTH` | Mindestlänge für automatisch akzeptierte Titel | `8` |
 | `TRIGGER_PORT` | Port des AI-Worker HTTP-Servers | `8080` |
+| `REVIEW_UI_PORT` | Port der Review UI | `8090` |
+| `DRY_RUN` | Klassifizieren ohne Paperless-Metadaten zu ändern | `false` |
 
 ---
 
@@ -141,14 +139,13 @@ Danach Paperless öffnen:
 http://localhost:8000
 ```
 
-Standardwerte aus `docker-compose.yml`:
+Die Admin-Zugangsdaten solltest du über `.env` setzen:
 
-```text
-Benutzer: admin
-Passwort: changeme
+```env
+PAPERLESS_ADMIN_USER=admin
+PAPERLESS_ADMIN_PASSWORD=ein-sicheres-passwort
+POSTGRES_PASSWORD=ein-sicheres-db-passwort
 ```
-
-> Für produktive Nutzung solltest du diese Zugangsdaten unbedingt ändern.
 
 ---
 
@@ -176,26 +173,22 @@ curl -X POST "http://localhost:8080/process?document_id=123"
 
 ---
 
-## Exportlogik
+## Paperless als Single Source of Truth
 
-Valide Klassifizierungen werden so abgelegt:
+Valide Klassifizierungen werden direkt in Paperless geschrieben:
 
-```text
-exports/
-└── <document_type>/
-    └── <correspondent>/
-        └── <title>_<tag1>_<tag2>.pdf
-```
+- Titel
+- Korrespondent
+- Dokumenttyp
+- Tags
 
-Unsichere Klassifizierungen landen im Review-Ordner:
+Unsichere Klassifizierungen werden nicht exportiert. Sie erhalten in Paperless:
 
-```text
-exports/
-└── _REVIEW/
-    └── 2026-05-13_review_doc-123_low_confidence_a1b2c3d4.pdf
-```
+- Titelpräfix `[Review]`
+- Tag `needs-ai-review`
+- optional bereits erkannte Metadaten wie Korrespondent, Dokumenttyp und Tags
 
-Ein Dokument wird in den Review verschoben, wenn z. B.:
+Ein Dokument landet im Review, wenn z. B.:
 
 - die Confidence zu niedrig ist
 - der Titel zu kurz ist
@@ -252,64 +245,17 @@ pytest
 
 ---
 
-## Verbesserungsideen
-
-### Kurzfristig
-
-- `.env.example` ergänzen
-- `pytest`, `ruff` und `mypy` in die Dev-Abhängigkeiten aufnehmen
-- GitHub Actions für Tests und Linting einrichten
-- Dockerfile härten: Non-root User, Healthcheck, gepinnte Base-Image-Version
-- Paperless Admin-Passwort nicht fest in `docker-compose.yml` hinterlegen
-- Konfiguration mit Pydantic Settings statt manueller `os.getenv`-Logik
-- Tests für Validator, Exporter, DB und Clients ergänzen
-- Timeouts, Retry-Verhalten und Fehlerstatus genauer testen
-
-### Mittelfristig
-
-- Taxonomie konfigurierbar machen, z. B. über YAML/JSON
-- Paperless-Metadaten vollständig setzen: Korrespondent, Dokumenttyp, Tags
-- Mapping von Namen zu Paperless-IDs implementieren
-- Review-Dashboard oder CLI für unsichere Dokumente bauen
-- Feedback-Loop: manuelle Korrekturen speichern und für bessere Prompts nutzen
-- Batch-Modus für bereits vorhandene Paperless-Dokumente
-- Reprocessing-Funktion für fehlgeschlagene Dokumente
-- Bessere Statusübersicht über SQLite oder kleine Web-UI
-
-### Langfristig
-
-- Mehrstufige Klassifizierung:
-  1. Dokumenttyp erkennen
-  2. Korrespondent extrahieren
-  3. Titel und Datum ableiten
-  4. Tags bestimmen
-- OCR-Qualitätsbewertung vor der Klassifizierung
-- Optionales Embedding/RAG-System für ähnliche Dokumente
-- Regelbasierte Vorfilter für bekannte Absender
-- Automatische Datums-, Betrags- und Vertragsnummernextraktion
-- Multi-Tenant- oder Familien-/Haushaltsprofile
-- Backup- und Exportstrategie für Datenbank und Klassifizierungshistorie
-
----
-
 ## Sicherheitshinweise
 
 - `PAPERLESS_TOKEN` niemals committen
 - Standardpasswörter ändern
-- Exportordner und SQLite-Datenbank regelmäßig sichern
+- SQLite-Datenbank regelmäßig sichern
 - Den AI-Worker nicht öffentlich ins Internet stellen
-- LLM-Ausgaben immer validieren, bevor Dateien automatisch verschoben oder Metadaten geändert werden
+- LLM-Ausgaben immer validieren, bevor Metadaten automatisch geändert werden
 
 ---
 
 ## Status
 
-Das Projekt ist ein funktionaler Prototyp für lokale, KI-gestützte Dokumentenklassifizierung mit Paperless und Ollama.  
+Das Projekt ist ein funktionaler Prototyp für lokale, KI-gestützte Dokumentenklassifizierung mit Paperless und Ollama.
 Für produktiven Einsatz sollten Tests, Konfigurationsvalidierung, Secrets-Handling und Monitoring weiter ausgebaut werden.
-
----
-
-## Lizenz
-
-Aktuell ist keine Lizenzdatei im Repository enthalten.  
-Wenn das Projekt öffentlich weiterentwickelt werden soll, sollte eine passende Lizenz ergänzt werden, z. B. MIT, Apache-2.0 oder GPL-3.0.
