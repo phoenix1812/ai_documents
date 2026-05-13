@@ -1,10 +1,11 @@
-"""
-Document processing pipeline.
+"""Document processing pipeline.
 
 Paperless is the single source of truth for documents and document metadata.
 This classifier no longer exports PDF files. Workflow state such as review
 requirements is stored only in SQLite for the review UI.
 """
+
+from __future__ import annotations
 
 import json
 import logging
@@ -28,6 +29,7 @@ from app.paperless_client import PaperlessClient
 from app.validator import validate_classification
 
 logger = logging.getLogger(__name__)
+
 
 TECHNICAL_WORKFLOW_TAGS = {
     "review",
@@ -55,6 +57,7 @@ def build_paperless_document_url(document_id: int) -> str:
 
 def get_result_confidence(result: ClassificationResult) -> float | None:
     value = getattr(result, "confidence", None)
+
     if value is None:
         return None
 
@@ -66,6 +69,7 @@ def get_result_confidence(result: ClassificationResult) -> float | None:
 
 def get_result_reason(result: ClassificationResult) -> str | None:
     value = getattr(result, "reason", None)
+
     if value is None:
         return None
 
@@ -97,8 +101,9 @@ def sanitize_title_part(value: str | None) -> str:
 def build_document_title(result: ClassificationResult) -> str:
     """Build a deterministic Paperless title from structured fields.
 
-    The LLM may provide a title, but the final Paperless title is generated here
-    to keep names consistent and to avoid generic values such as "Rechnung".
+    The LLM may provide a title, but the final Paperless title is generated
+    here to keep names consistent and to avoid generic values such as
+    "Rechnung".
     """
 
     parts: list[str] = []
@@ -114,6 +119,14 @@ def build_document_title(result: ClassificationResult) -> str:
 
     if result.document_date:
         parts.append(result.document_date)
+
+    # Add the most useful identifier, but avoid overly long titles.
+    if result.invoice_number:
+        parts.append(result.invoice_number)
+    elif result.contract_number:
+        parts.append(result.contract_number)
+    elif result.customer_number:
+        parts.append(result.customer_number)
 
     if result.amount:
         parts.append(result.amount)
@@ -146,10 +159,12 @@ def clean_paperless_tags(tags: list[str] | None) -> list[str]:
 
     for tag in tags or []:
         clean_tag = str(tag).strip()
+
         if not clean_tag:
             continue
 
         normalized = clean_tag.lower().replace(" ", "_")
+
         if normalized in TECHNICAL_WORKFLOW_TAGS:
             continue
 
@@ -291,6 +306,7 @@ class DocumentClassifier:
             reason = get_result_reason(result)
 
             validation = validate_classification(result)
+
             if not validation.valid:
                 return self._store_review(
                     document_id=document_id,
@@ -361,6 +377,7 @@ class DocumentClassifier:
                 status=STATUS_FAILED_API,
             )
             raise
+
         except Exception as exc:
             self.db.mark_failed(
                 paperless_id=document_id,
