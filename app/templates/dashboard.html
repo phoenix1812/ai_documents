@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · AI Documents{% endblock %}
+{% block content %}
+<header class="header"><div><h1>Dashboard</h1><p>Statusübersicht und letzte Verarbeitungen.</p></div></header>
+<section class="stats-grid">
+{% for status, count in counts.items() %}<article class="stat-card"><span class="muted">{{ status }}</span><strong>{{ count }}</strong></article>{% endfor %}
+</section>
+<section class="panel"><h2>Letzte Dokumente</h2>
+{% if not recent %}<p>Keine Dokumente vorhanden.</p>{% else %}
+<table><thead><tr><th>ID</th><th>Paperless</th><th>Status</th><th>Titel</th><th>Confidence</th><th>Verarbeitet</th></tr></thead><tbody>
+{% for item in recent %}<tr><td><a href="/items/{{ item.id }}">{{ item.id }}</a></td><td>{{ item.paperless_id }}</td><td><span class="badge">{{ item.status }}</span></td><td>{{ item.title or item.original_title or "—" }}</td><td><span class="confidence {{ item.confidence_class }}">{{ item.confidence_display }}</span></td><td>{{ item.processed_at or "—" }}</td></tr>{% endfor %}
+</tbody></table>{% endif %}</section>
+{% endblock %}

@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block title %}Reprocess · AI Documents{% endblock %}
+{% block content %}
+<header class="header"><div><h1>Manuell neu verarbeiten</h1><p>Nutze das, wenn ein Paperless-Webhook verpasst wurde oder der Worker vorher abgestürzt ist.</p></div></header>
+<section class="panel narrow">{% if result %}<div class="notice success-notice">{{ result }}</div>{% endif %}{% if error %}<div class="notice error-notice">{{ error }}</div>{% endif %}<form method="post" action="/reprocess" class="edit-form"><label>Paperless-ID<input type="number" name="paperless_id" min="1" required></label><button class="button success" type="submit">Neu verarbeiten</button></form></section>
+{% endblock %}

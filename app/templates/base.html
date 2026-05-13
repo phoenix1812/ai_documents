@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="de">
+<head>
+    <meta charset="utf-8">
+    <title>{% block title %}AI Documents Review{% endblock %}</title>
+    <link rel="stylesheet" href="/static/review.css">
+</head>
+<body>
+<nav class="topnav">
+    <a href="/">Dashboard</a>
+    <a href="/review">Review</a>
+    <a href="/failed">Fehler</a>
+    <a href="/reprocess">Reprocess</a>
+    <a href="/learning">Learning</a>
+</nav>
+<main class="container {% block container_class %}{% endblock %}">
+    {% block content %}{% endblock %}
+</main>
+</body>
+</html>

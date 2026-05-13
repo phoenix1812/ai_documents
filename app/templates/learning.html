@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block title %}Learning · AI Documents{% endblock %}
+{% block content %}
+<header class="header"><div><h1>Review Learning</h1><p>Historie deiner Freigaben und Ablehnungen. Daraus können später Prompt-Beispiele entstehen.</p></div></header>
+<section class="panel">{% if not decisions %}<p>Noch keine Review-Entscheidungen vorhanden.</p>{% else %}<table><thead><tr><th>Zeit</th><th>Aktion</th><th>Paperless</th><th>KI-Titel</th><th>Finaler Titel</th><th>Grund</th></tr></thead><tbody>{% for item in decisions %}<tr><td>{{ item.created_at }}</td><td><span class="badge">{{ item.action }}</span></td><td>{{ item.paperless_id }}</td><td>{{ item.original_ai_title or "—" }}</td><td>{{ item.final_title or "—" }}</td><td>{{ item.reason or "—" }}</td></tr>{% endfor %}</tbody></table>{% endif %}</section>
+{% endblock %}
