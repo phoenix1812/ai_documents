@@ -27,14 +27,13 @@ class QueueStatus:
 
 
 class DocumentProcessingQueue:
-    """Process Paperless documents sequentially in a single background worker."""
-
     def __init__(self, worker: Worker) -> None:
         self.worker = worker
         self._queue: queue.Queue[int] = queue.Queue()
         self._lock = threading.Lock()
         self._queued_or_running: set[int] = set()
         self._current_document_id: int | None = None
+
         self._thread = threading.Thread(
             target=self._run,
             daemon=True,
@@ -43,7 +42,9 @@ class DocumentProcessingQueue:
         self._thread.start()
 
     def enqueue(self, document_id: int) -> QueueStatus:
-        """Add a document to the queue unless it is already queued or running."""
+        if document_id <= 0:
+            raise ValueError("document_id must be greater than 0")
+
         with self._lock:
             if document_id in self._queued_or_running:
                 return QueueStatus(
@@ -66,7 +67,6 @@ class DocumentProcessingQueue:
             )
 
     def snapshot(self) -> dict:
-        """Return a small status snapshot for health/debug endpoints."""
         with self._lock:
             return {
                 "current_document_id": self._current_document_id,
@@ -77,6 +77,7 @@ class DocumentProcessingQueue:
     def _run(self) -> None:
         while True:
             document_id = self._queue.get()
+
             with self._lock:
                 self._current_document_id = document_id
 
@@ -94,4 +95,5 @@ class DocumentProcessingQueue:
                 with self._lock:
                     self._queued_or_running.discard(document_id)
                     self._current_document_id = None
+
                 self._queue.task_done()
