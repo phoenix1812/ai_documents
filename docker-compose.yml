@@ -12,14 +12,12 @@ services:
   # -------------------------
   db:
     image: postgres:16
-    container_name: postgres
-    restart: unless-stopped
     environment:
-      POSTGRES_DB: paperless
-      POSTGRES_USER: paperless
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-paperless}
+      POSTGRES_DB: ${POSTGRES_DB:-paperless}
+      POSTGRES_USER: ${POSTGRES_USER:-paperless}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
-      - ./data/postgres:/var/lib/postgresql/data
+      - ${POSTGRES_DATA_PATH:-./data/postgres}:/var/lib/postgresql/data
 
   # -------------------------
   # OLLAMA
@@ -48,8 +46,11 @@ services:
       - "8000:8000"
     environment:
       PAPERLESS_REDIS: redis://redis:6379
-      PAPERLESS_DBHOST: db
-      PAPERLESS_DBPASS: ${POSTGRES_PASSWORD:-paperless}
+      paperless:
+      PAPERLESS_DBHOST: ${PAPERLESS_DBHOST:-db}
+      PAPERLESS_DBNAME: ${POSTGRES_DB:-paperless}
+      PAPERLESS_DBUSER: ${POSTGRES_USER:-paperless}
+      PAPERLESS_DBPASS: ${POSTGRES_PASSWORD}
       PAPERLESS_TIME_ZONE: Europe/Berlin
       PAPERLESS_OCR_LANGUAGE: deu+eng
       PAPERLESS_OCR_LANGUAGES: deu eng
@@ -64,9 +65,9 @@ services:
       PAPERLESS_POST_CONSUME_SCRIPT: /usr/src/paperless/scripts/post-consume-ai-worker.sh
       AI_WORKER_TRIGGER_URL: http://ai-worker:8080/process
     volumes:
-      - ~/paperless-consume:/usr/src/paperless/consume
-      - ./paperless-data:/usr/src/paperless/data
-      - /Volumes/homes/waldi/Drive/Dokumente/paperless/media:/usr/src/paperless/media
+      - ${PAPERLESS_CONSUME_PATH:-./paperless-consume}:/usr/src/paperless/consume
+      - ${PAPERLESS_DATA_PATH:-./paperless-data}:/usr/src/paperless/data
+      - ${PAPERLESS_MEDIA_PATH:-./paperless-media}:/usr/src/paperless/media
       - ./scripts:/usr/src/paperless/scripts:ro
 
   # -------------------------
