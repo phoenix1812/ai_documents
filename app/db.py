@@ -1,5 +1,4 @@
-"""
-Robust SQLite database layer for AI Documents.
+"""Robust SQLite database layer for AI Documents.
 
 Supports:
 - document tracking
@@ -8,6 +7,8 @@ Supports:
 - manual corrections of already approved documents
 - retry/reprocess
 - review-learning log
+- exact duplicate detection by PDF hash
+- probable duplicate detection by normalized OCR hash
 """
 
 from __future__ import annotations
@@ -17,7 +18,6 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-
 
 STATUS_DONE = "DONE"
 STATUS_AUTO_APPROVED = "AUTO_APPROVED"
@@ -69,14 +69,12 @@ class Database:
     def __init__(self, db_path: str) -> None:
         Path(db_path).mkdir(parents=True, exist_ok=True)
         self.db_file = Path(db_path) / "documents.db"
-
         self.conn = sqlite3.connect(
             self.db_file,
             check_same_thread=False,
             timeout=30,
         )
         self.conn.row_factory = sqlite3.Row
-
         self._configure_sqlite()
         self._init_db()
 
@@ -99,52 +97,40 @@ class Database:
     def parse_json_list(value: Any) -> list[str]:
         if value is None:
             return []
-
         if isinstance(value, list):
             return [str(item).strip() for item in value if str(item).strip()]
-
         if isinstance(value, str):
             value = value.strip()
             if not value:
                 return []
-
             try:
                 parsed = json.loads(value)
                 if isinstance(parsed, list):
-                    return [
-                        str(item).strip()
-                        for item in parsed
-                        if str(item).strip()
-                    ]
+                    return [str(item).strip() for item in parsed if str(item).strip()]
             except json.JSONDecodeError:
                 pass
-
             return [item.strip() for item in value.split(",") if item.strip()]
-
         return []
 
     def _column_exists(self, table: str, column: str) -> bool:
         rows = self.conn.execute(f"PRAGMA table_info({table})").fetchall()
         return any(row["name"] == column for row in rows)
 
-    def _add_column_if_missing(
-        self,
-        table: str,
-        column: str,
-        definition: str,
-    ) -> None:
+    def _add_column_if_missing(self, table: str, column: str, definition: str) -> None:
         if not self._column_exists(table, column):
-            self.conn.execute(
-                f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
-            )
+            self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
             self.conn.commit()
 
     def _init_db(self) -> None:
-        self.conn.execute("""
+        self.conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS documents (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 paperless_id INTEGER,
                 file_hash TEXT UNIQUE,
+                ocr_hash TEXT,
+                duplicate_of_paperless_id INTEGER,
+                duplicate_reason TEXT,
                 title TEXT,
                 correspondent TEXT,
                 document_type TEXT,
@@ -162,9 +148,13 @@ class Database:
                 created_at TEXT,
                 processed_at TEXT
             )
-        """)
+            """
+        )
 
         for column, definition in (
+            ("ocr_hash", "TEXT"),
+            ("duplicate_of_paperless_id", "INTEGER"),
+            ("duplicate_reason", "TEXT"),
             ("tags", "TEXT DEFAULT '[]'"),
             ("confidence", "REAL"),
             ("reason", "TEXT"),
@@ -176,7 +166,8 @@ class Database:
         ):
             self._add_column_if_missing("documents", column, definition)
 
-        self.conn.execute("""
+        self.conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS review_decisions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 document_db_id INTEGER,
@@ -193,29 +184,15 @@ class Database:
                 reason TEXT,
                 created_at TEXT NOT NULL
             )
-        """)
+            """
+        )
 
-        self.conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_documents_paperless_id
-            ON documents (paperless_id)
-        """)
-        self.conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_documents_file_hash
-            ON documents (file_hash)
-        """)
-        self.conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_documents_status
-            ON documents (status)
-        """)
-        self.conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_documents_processed_at
-            ON documents (processed_at)
-        """)
-        self.conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_review_decisions_paperless_id
-            ON review_decisions (paperless_id)
-        """)
-
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_paperless_id ON documents (paperless_id)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_file_hash ON documents (file_hash)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_ocr_hash ON documents (ocr_hash)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_status ON documents (status)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_processed_at ON documents (processed_at)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_review_decisions_paperless_id ON review_decisions (paperless_id)")
         self.conn.commit()
 
     @staticmethod
@@ -231,6 +208,37 @@ class Database:
         ).fetchone()
         return row is not None
 
+    def get_by_file_hash(self, file_hash: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT * FROM documents
+            WHERE file_hash = ?
+            ORDER BY processed_at DESC, id DESC
+            LIMIT 1
+            """,
+            (file_hash,),
+        ).fetchone()
+        return self.row_to_dict(row)
+
+    def exists_ocr_hash(self, ocr_hash: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM documents WHERE ocr_hash = ? LIMIT 1",
+            (ocr_hash,),
+        ).fetchone()
+        return row is not None
+
+    def get_by_ocr_hash(self, ocr_hash: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT * FROM documents
+            WHERE ocr_hash = ?
+            ORDER BY processed_at DESC, id DESC
+            LIMIT 1
+            """,
+            (ocr_hash,),
+        ).fetchone()
+        return self.row_to_dict(row)
+
     def exists_paperless_id(
         self,
         paperless_id: int,
@@ -239,8 +247,7 @@ class Database:
         placeholders = ", ".join("?" for _ in statuses)
         row = self.conn.execute(
             f"""
-            SELECT 1
-            FROM documents
+            SELECT 1 FROM documents
             WHERE paperless_id = ?
               AND status IN ({placeholders})
             LIMIT 1
@@ -265,13 +272,19 @@ class Database:
         original_title: str | None = None,
         ocr_excerpt: str | None = None,
         paperless_url: str | None = None,
+        ocr_hash: str | None = None,
+        duplicate_of_paperless_id: int | None = None,
+        duplicate_reason: str | None = None,
     ) -> None:
         now = self._now()
-
-        self.conn.execute("""
+        self.conn.execute(
+            """
             INSERT OR REPLACE INTO documents (
                 paperless_id,
                 file_hash,
+                ocr_hash,
+                duplicate_of_paperless_id,
+                duplicate_reason,
                 title,
                 correspondent,
                 document_type,
@@ -288,44 +301,46 @@ class Database:
                 created_at,
                 processed_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(
-                (SELECT retry_count FROM documents WHERE file_hash = ?),
-                0
-            ), ?, ?)
-        """, (
-            paperless_id,
-            file_hash,
-            title,
-            correspondent,
-            document_type,
-            self._json_list(tags),
-            confidence,
-            reason,
-            original_title,
-            ocr_excerpt,
-            paperless_url,
-            export_path,
-            status,
-            error_message,
-            file_hash,
-            now,
-            now,
-        ))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                COALESCE((SELECT retry_count FROM documents WHERE file_hash = ?), 0),
+                ?, ?)
+            """,
+            (
+                paperless_id,
+                file_hash,
+                ocr_hash,
+                duplicate_of_paperless_id,
+                duplicate_reason,
+                title,
+                correspondent,
+                document_type,
+                self._json_list(tags),
+                confidence,
+                reason,
+                original_title,
+                ocr_excerpt,
+                paperless_url,
+                export_path,
+                status,
+                error_message,
+                file_hash,
+                now,
+                now,
+            ),
+        )
         self.conn.commit()
 
-    def mark_failed(
-        self,
-        paperless_id: int,
-        error_message: str,
-        status: str = STATUS_FAILED,
-    ) -> None:
+    def mark_failed(self, paperless_id: int, error_message: str, status: str = STATUS_FAILED) -> None:
         now = self._now()
         synthetic_hash = f"{status}-{paperless_id}-{now}"
-
-        self.conn.execute("""
+        self.conn.execute(
+            """
             INSERT INTO documents (
                 paperless_id,
                 file_hash,
+                ocr_hash,
+                duplicate_of_paperless_id,
+                duplicate_reason,
                 title,
                 correspondent,
                 document_type,
@@ -342,41 +357,40 @@ class Database:
                 created_at,
                 processed_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            paperless_id,
-            synthetic_hash,
-            "",
-            "",
-            "",
-            "[]",
-            None,
-            None,
-            None,
-            None,
-            None,
-            "",
-            status,
-            error_message,
-            0,
-            now,
-            now,
-        ))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                paperless_id,
+                synthetic_hash,
+                None,
+                None,
+                None,
+                "",
+                "",
+                "",
+                "[]",
+                None,
+                None,
+                None,
+                None,
+                None,
+                "",
+                status,
+                error_message,
+                0,
+                now,
+                now,
+            ),
+        )
         self.conn.commit()
 
-    def list_by_statuses(
-        self,
-        statuses: tuple[str, ...],
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
+    def list_by_statuses(self, statuses: tuple[str, ...], limit: int = 100) -> list[dict[str, Any]]:
         if not statuses:
             return []
-
         placeholders = ", ".join("?" for _ in statuses)
         rows = self.conn.execute(
             f"""
-            SELECT *
-            FROM documents
+            SELECT * FROM documents
             WHERE status IN ({placeholders})
             ORDER BY processed_at DESC, id DESC
             LIMIT ?
@@ -401,16 +415,18 @@ class Database:
 
         if query:
             like = f"%{query.strip()}%"
-            where.append("""
+            where.append(
+                """
                 (
-                    title LIKE ?
-                    OR original_title LIKE ?
-                    OR correspondent LIKE ?
-                    OR document_type LIKE ?
-                    OR tags LIKE ?
-                    OR CAST(paperless_id AS TEXT) LIKE ?
+                    title LIKE ? OR
+                    original_title LIKE ? OR
+                    correspondent LIKE ? OR
+                    document_type LIKE ? OR
+                    tags LIKE ? OR
+                    CAST(paperless_id AS TEXT) LIKE ?
                 )
-            """)
+                """
+            )
             params.extend([like, like, like, like, like, like])
 
         if where:
@@ -429,14 +445,10 @@ class Database:
         ).fetchone()
         return self.row_to_dict(row)
 
-    def get_latest_for_paperless_id(
-        self,
-        paperless_id: int,
-    ) -> dict[str, Any] | None:
+    def get_latest_for_paperless_id(self, paperless_id: int) -> dict[str, Any] | None:
         row = self.conn.execute(
             """
-            SELECT *
-            FROM documents
+            SELECT * FROM documents
             WHERE paperless_id = ?
             ORDER BY processed_at DESC, id DESC
             LIMIT 1
@@ -456,45 +468,25 @@ class Database:
         result = self.conn.execute(
             """
             UPDATE documents
-            SET title = ?,
-                correspondent = ?,
-                document_type = ?,
-                tags = ?,
-                processed_at = ?
+            SET title = ?, correspondent = ?, document_type = ?, tags = ?, processed_at = ?
             WHERE id = ?
             """,
-            (
-                title,
-                correspondent,
-                document_type,
-                self._json_list(tags),
-                self._now(),
-                document_db_id,
-            ),
+            (title, correspondent, document_type, self._json_list(tags), self._now(), document_db_id),
         )
         self.conn.commit()
-
         if result.rowcount == 0:
             raise ValueError(f"Document DB row not found: {document_db_id}")
 
-    def update_status(
-        self,
-        document_db_id: int,
-        status: str,
-        error_message: str | None = None,
-    ) -> None:
+    def update_status(self, document_db_id: int, status: str, error_message: str | None = None) -> None:
         result = self.conn.execute(
             """
             UPDATE documents
-            SET status = ?,
-                error_message = ?,
-                processed_at = ?
+            SET status = ?, error_message = ?, processed_at = ?
             WHERE id = ?
             """,
             (status, error_message, self._now(), document_db_id),
         )
         self.conn.commit()
-
         if result.rowcount == 0:
             raise ValueError(f"Document DB row not found: {document_db_id}")
 
@@ -511,7 +503,6 @@ class Database:
             (now, now, document_db_id),
         )
         self.conn.commit()
-
         if result.rowcount == 0:
             raise ValueError(f"Document DB row not found: {document_db_id}")
 
@@ -529,8 +520,7 @@ class Database:
     def recent_documents(self, limit: int = 10) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             """
-            SELECT *
-            FROM documents
+            SELECT * FROM documents
             ORDER BY processed_at DESC, id DESC
             LIMIT ?
             """,
@@ -593,8 +583,7 @@ class Database:
     def learning_summary(self, limit: int = 25) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             """
-            SELECT *
-            FROM review_decisions
+            SELECT * FROM review_decisions
             ORDER BY created_at DESC, id DESC
             LIMIT ?
             """,

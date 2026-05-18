@@ -1,63 +1,85 @@
 {% extends "base.html" %}
 {% block title %}Review · AI Documents{% endblock %}
-
 {% block content %}
-<header class="header">
-    <div>
-        <h1>Review</h1>
-        <p>Nur offene Review- und Dry-Run-Dokumente.</p>
+<div class="page-shell wide">
+  <section class="page-heading">
+    <h1>Review</h1>
+    <p>Nur offene Review- und Dry-Run-Dokumente.</p>
+  </section>
+
+  <section class="filter-card compact">
+    <div class="quick-filters">
+      <a class="filter-chip {% if not selected_status %}active{% endif %}" href="/review">Alle offenen</a>
+      <a class="filter-chip {% if selected_status == status_needs_review %}active{% endif %}" href="/review?status={{ status_needs_review }}">Needs Review</a>
+      <a class="filter-chip {% if selected_status == status_review_required %}active{% endif %}" href="/review?status={{ status_review_required }}">Review Required</a>
+      <a class="filter-chip {% if selected_status == status_dry_run %}active{% endif %}" href="/review?status={{ status_dry_run }}">Dry Run</a>
     </div>
-</header>
+  </section>
 
-<nav class="filters">
-    <a class="{% if not selected_status %}active{% endif %}" href="/review">Alle offenen</a>
-    <a class="{% if selected_status == status_needs_review %}active{% endif %}" href="/review?status={{ status_needs_review }}">Needs Review</a>
-    <a class="{% if selected_status == status_review_required %}active{% endif %}" href="/review?status={{ status_review_required }}">Review Required</a>
-    <a class="{% if selected_status == status_dry_run %}active{% endif %}" href="/review?status={{ status_dry_run }}">Dry Run</a>
-</nav>
-
-{% if not items %}
-    <section class="empty">
+  <section class="table-card">
+    {% if not items %}
+      <div class="empty-state">
         <h2>Keine offenen Reviews</h2>
-    </section>
-{% else %}
-    <section class="cards">
-        {% for item in items %}
-            <article class="card">
-                <div class="card-top">
-                    <span class="badge">{{ item.status }}</span>
-                    <span class="confidence {{ item.confidence_class }}">{{ item.confidence_display }}</span>
-                </div>
+        <p>Aktuell wartet kein Dokument auf manuelle Prüfung.</p>
+      </div>
+    {% else %}
+      <div class="table-scroll">
+        <table class="documents-table">
+          <thead>
+            <tr>
+              <th>DB-ID</th>
+              <th>Paperless-ID</th>
+              <th>Status</th>
+              <th>Titel</th>
+              <th>Typ</th>
+              <th>Korrespondent</th>
+              <th>Tags</th>
+              <th>Confidence</th>
+              <th>Aktion</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in items %}
+              <tr>
+                <td><a class="id-link" href="/items/{{ item.id }}">{{ item.id }}</a></td>
+                <td>{{ item.paperless_id }}</td>
+                <td><span class="badge status-{{ (item.status or 'unknown')|lower|replace('_', '-') }}">{{ item.status }}</span></td>
+                <td class="title-cell">
+                  {{ item.title or "Ohne Titel" }}
+                  {% if item.reason %}<div class="row-subtext">{{ item.reason }}</div>{% endif %}
+                </td>
+                <td>{{ item.document_type or "—" }}</td>
+                <td>{{ item.correspondent or "—" }}</td>
+                <td>
+                  <div class="tag-list">
+                    {% if item.tags_list %}
+                      {% for tag in item.tags_list %}
+                        <span class="tag-pill">{{ tag }}</span>
+                      {% endfor %}
+                    {% elif item.tags_display %}
+                      {% for tag in item.tags_display.split(',') %}
+                        <span class="tag-pill">{{ tag.strip() }}</span>
+                      {% endfor %}
+                    {% else %}
+                      <span class="muted">—</span>
+                    {% endif %}
+                  </div>
+                </td>
+                <td><span class="confidence {{ item.confidence_class or '' }}">{{ item.confidence_display }}</span></td>
+                <td><a class="button small" href="/items/{{ item.id }}">Prüfen</a></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
 
-                <p class="muted">DB-ID {{ item.id }} · Paperless-ID {{ item.paperless_id }}</p>
-                <h2>{{ item.title or "Ohne Titel" }}</h2>
-
-                <dl>
-                    <div>
-                        <dt>Originaltitel</dt>
-                        <dd>{{ item.original_title or "—" }}</dd>
-                    </div>
-                    <div>
-                        <dt>Typ</dt>
-                        <dd>{{ item.document_type or "—" }}</dd>
-                    </div>
-                    <div>
-                        <dt>Korrespondent</dt>
-                        <dd>{{ item.correspondent or "—" }}</dd>
-                    </div>
-                    <div>
-                        <dt>Tags</dt>
-                        <dd>{{ item.tags_display or "—" }}</dd>
-                    </div>
-                    <div>
-                        <dt>Begründung</dt>
-                        <dd>{{ item.reason or "—" }}</dd>
-                    </div>
-                </dl>
-
-                <a class="button" href="/items/{{ item.id }}">Prüfen</a>
-            </article>
-        {% endfor %}
-    </section>
-{% endif %}
+      <div class="table-footer">
+        <span>{{ items|length }} offene Review-Einträge</span>
+        <div class="pager">
+          <span class="pager-current">1</span>
+        </div>
+      </div>
+    {% endif %}
+  </section>
+</div>
 {% endblock %}

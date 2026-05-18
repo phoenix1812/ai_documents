@@ -1,23 +1,37 @@
 <!doctype html>
 <html lang="de">
 <head>
-    <meta charset="utf-8">
-    <title>{% block title %}AI Documents Review{% endblock %}</title>
-    <link rel="stylesheet" href="/static/review.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}AI Documents{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='/review.css') }}">
 </head>
 <body>
-<nav class="topnav">
-    <a href="/">Dashboard</a>
-    <a href="/documents">Dokumente</a>
-    <a href="/auto-approved">Auto-Approvals</a>
-    <a href="/review">Review</a>
-    <a href="/failed">Fehler</a>
-    <a href="/reprocess">Reprocess</a>
-    <a href="/learning">Learning</a>
-</nav>
+  <header class="topnav">
+    <a class="brand" href="/" aria-label="AI Documents Dashboard">
+      <span class="brand-icon">⌘</span>
+      <span>AI Documents</span>
+    </a>
 
-<main class="container {% block container_class %}{% endblock %}">
+    <nav class="nav-links" aria-label="Hauptnavigation">
+      <a href="/" class="nav-link">Dashboard</a>
+      <a href="/documents" class="nav-link">Dokumente</a>
+      <a href="/auto-approved" class="nav-link">Auto-Approvals</a>
+      <a href="/review" class="nav-link">Review</a>
+      <a href="/failed" class="nav-link">Fehler</a>
+      <a href="/reprocess" class="nav-link">Reprocess</a>
+      <a href="/learning" class="nav-link">Learning</a>
+    </nav>
+
+    <div class="nav-actions" aria-hidden="true">
+      <span class="nav-icon">☾</span>
+      <span class="nav-icon">◌</span>
+      <span class="user-pill">U</span>
+    </div>
+  </header>
+
+  <main>
     {% block content %}{% endblock %}
-</main>
+  </main>
 </body>
 </html>

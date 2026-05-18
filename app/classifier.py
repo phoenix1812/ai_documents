@@ -22,6 +22,7 @@ from app.db import STATUS_FAILED_LLM
 from app.db import STATUS_FAILED_OCR
 from app.db import STATUS_NEEDS_REVIEW
 from app.db import STATUS_SKIPPED_DUPLICATE
+from app.hash_store import ocr_sha256
 from app.hash_store import sha256
 from app.models import ClassificationResult
 from app.ollama_client import OllamaClient
@@ -29,7 +30,6 @@ from app.paperless_client import PaperlessClient
 from app.validator import validate_classification
 
 logger = logging.getLogger(__name__)
-
 
 TECHNICAL_WORKFLOW_TAGS = {
     "review",
@@ -57,10 +57,8 @@ def build_paperless_document_url(document_id: int) -> str:
 
 def get_result_confidence(result: ClassificationResult) -> float | None:
     value = getattr(result, "confidence", None)
-
     if value is None:
         return None
-
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -69,75 +67,43 @@ def get_result_confidence(result: ClassificationResult) -> float | None:
 
 def get_result_reason(result: ClassificationResult) -> str | None:
     value = getattr(result, "reason", None)
-
     if value is None:
         return None
-
     return str(value).strip() or None
 
 
 def sanitize_title_part(value: str | None) -> str:
-    """Prepare one title component for Paperless.
-
-    Requirements:
-    - no spaces
-    - underscores as separators
-    - keep common German characters
-    - remove characters that are problematic in filenames and Paperless titles
-    """
-
+    """Prepare one title component for Paperless."""
     if value is None:
         return ""
-
     value = str(value).strip()
     value = value.replace("€", "EUR")
     value = value.replace(" ", "_")
     value = re.sub(r"[^A-Za-z0-9_\-().,äöüÄÖÜß]", "", value)
     value = re.sub(r"_+", "_", value)
-
     return value.strip("_")
 
 
 def build_document_title(result: ClassificationResult) -> str:
-    """Build a deterministic Paperless title from structured fields.
-
-    The LLM may provide a title, but the final Paperless title is generated
-    here to keep names consistent and to avoid generic values such as
-    "Rechnung".
-    """
-
+    """Build a deterministic Paperless title from structured fields."""
     parts: list[str] = []
 
     if result.document_type:
         parts.append(result.document_type)
-
     if result.correspondent:
         parts.append(result.correspondent)
-
     if result.subject:
         parts.append(result.subject)
-
     if result.document_date:
         parts.append(result.document_date)
-
-    # Add the most useful identifier, but avoid overly long titles.
-    if result.invoice_number:
-        parts.append(result.invoice_number)
-    elif result.contract_number:
-        parts.append(result.contract_number)
-    elif result.customer_number:
-        parts.append(result.customer_number)
-
     if result.amount:
         parts.append(result.amount)
 
     cleaned_parts = []
     seen = set()
-
     for part in parts:
         cleaned = sanitize_title_part(part)
         key = cleaned.lower()
-
         if cleaned and key not in seen:
             cleaned_parts.append(cleaned)
             seen.add(key)
@@ -153,21 +119,17 @@ def build_document_title(result: ClassificationResult) -> str:
 
 def clean_paperless_tags(tags: list[str] | None) -> list[str]:
     """Remove workflow tags before writing tags to Paperless."""
-
     cleaned_tags: list[str] = []
     seen: set[str] = set()
 
     for tag in tags or []:
         clean_tag = str(tag).strip()
-
         if not clean_tag:
             continue
 
         normalized = clean_tag.lower().replace(" ", "_")
-
         if normalized in TECHNICAL_WORKFLOW_TAGS:
             continue
-
         if normalized in seen:
             continue
 
@@ -187,6 +149,7 @@ class DocumentClassifier:
         self,
         document_id: int,
         file_hash: str,
+        ocr_hash: str | None,
         title: str,
         correspondent: str,
         document_type: str,
@@ -202,10 +165,10 @@ class DocumentClassifier:
 
         No review tag and no [Review] prefix is written to Paperless.
         """
-
         self.db.insert_document(
             paperless_id=document_id,
             file_hash=file_hash,
+            ocr_hash=ocr_hash,
             title=title,
             correspondent=correspondent,
             document_type=document_type,
@@ -219,37 +182,60 @@ class DocumentClassifier:
             status=STATUS_NEEDS_REVIEW,
             error_message=", ".join(reasons),
         )
-
         return STATUS_NEEDS_REVIEW
+
+    def _store_duplicate(
+        self,
+        document_id: int,
+        file_hash: str,
+        ocr_hash: str | None,
+        duplicate_reason: str,
+        duplicate_row: dict | None,
+    ) -> str:
+        duplicate_of_paperless_id = None
+        if duplicate_row is not None:
+            duplicate_of_paperless_id = duplicate_row.get("paperless_id")
+
+        synthetic_hash = f"{file_hash}-{document_id}-{duplicate_reason}"
+        self.db.insert_document(
+            paperless_id=document_id,
+            file_hash=synthetic_hash,
+            ocr_hash=ocr_hash,
+            duplicate_of_paperless_id=duplicate_of_paperless_id,
+            duplicate_reason=duplicate_reason,
+            title="",
+            correspondent="",
+            document_type="",
+            tags=[],
+            confidence=None,
+            reason="duplicate",
+            original_title=None,
+            ocr_excerpt=None,
+            paperless_url=build_paperless_document_url(document_id),
+            export_path="",
+            status=STATUS_SKIPPED_DUPLICATE,
+            error_message=f"Duplicate detected by {duplicate_reason}",
+        )
+        return STATUS_SKIPPED_DUPLICATE
 
     def process_document(self, document_id: int) -> str:
         file_hash = ""
+        ocr_hash: str | None = None
 
         try:
             file_bytes = self.paperless.download_document(document_id=document_id)
             file_hash = sha256(file_bytes)
 
-            if self.db.exists_hash(file_hash):
-                logger.info("Duplicate skipped by hash: %s", document_id)
-
-                self.db.insert_document(
-                    paperless_id=document_id,
-                    file_hash=f"{file_hash}-{document_id}-duplicate",
-                    title="",
-                    correspondent="",
-                    document_type="",
-                    tags=[],
-                    confidence=None,
-                    reason="duplicate",
-                    original_title=None,
-                    ocr_excerpt=None,
-                    paperless_url=build_paperless_document_url(document_id),
-                    export_path="",
-                    status=STATUS_SKIPPED_DUPLICATE,
-                    error_message=f"Duplicate hash: {file_hash}",
+            existing_by_file_hash = self.db.get_by_file_hash(file_hash)
+            if existing_by_file_hash is not None:
+                logger.info("Duplicate skipped by PDF hash: %s", document_id)
+                return self._store_duplicate(
+                    document_id=document_id,
+                    file_hash=file_hash,
+                    ocr_hash=None,
+                    duplicate_reason="pdf_hash",
+                    duplicate_row=existing_by_file_hash,
                 )
-
-                return STATUS_SKIPPED_DUPLICATE
 
             document = self.paperless.get_document(document_id)
             content = document.get("content", "")
@@ -261,6 +247,7 @@ class DocumentClassifier:
                 self.db.insert_document(
                     paperless_id=document_id,
                     file_hash=file_hash,
+                    ocr_hash=None,
                     title="",
                     correspondent="",
                     document_type="",
@@ -274,8 +261,19 @@ class DocumentClassifier:
                     status=STATUS_FAILED_OCR,
                     error_message="No OCR content",
                 )
-
                 return STATUS_FAILED_OCR
+
+            ocr_hash = ocr_sha256(content)
+            existing_by_ocr_hash = self.db.get_by_ocr_hash(ocr_hash)
+            if existing_by_ocr_hash is not None:
+                logger.info("Probable duplicate skipped by OCR hash: %s", document_id)
+                return self._store_duplicate(
+                    document_id=document_id,
+                    file_hash=file_hash,
+                    ocr_hash=ocr_hash,
+                    duplicate_reason="ocr_hash",
+                    duplicate_row=existing_by_ocr_hash,
+                )
 
             try:
                 result = self.ollama.classify(content)
@@ -283,6 +281,7 @@ class DocumentClassifier:
                 self.db.insert_document(
                     paperless_id=document_id,
                     file_hash=file_hash,
+                    ocr_hash=ocr_hash,
                     title="",
                     correspondent="",
                     document_type="",
@@ -296,7 +295,6 @@ class DocumentClassifier:
                     status=STATUS_FAILED_LLM,
                     error_message=str(exc),
                 )
-
                 return STATUS_FAILED_LLM
 
             result.tags = clean_paperless_tags(result.tags)
@@ -304,13 +302,13 @@ class DocumentClassifier:
 
             confidence = get_result_confidence(result)
             reason = get_result_reason(result)
-
             validation = validate_classification(result)
 
             if not validation.valid:
                 return self._store_review(
                     document_id=document_id,
                     file_hash=file_hash,
+                    ocr_hash=ocr_hash,
                     title=result.title,
                     correspondent=result.correspondent,
                     document_type=result.document_type,
@@ -327,6 +325,7 @@ class DocumentClassifier:
                 self.db.insert_document(
                     paperless_id=document_id,
                     file_hash=file_hash,
+                    ocr_hash=ocr_hash,
                     title=result.title,
                     correspondent=result.correspondent,
                     document_type=result.document_type,
@@ -340,7 +339,6 @@ class DocumentClassifier:
                     status=STATUS_DRY_RUN,
                     error_message="Dry run: Paperless metadata was not updated.",
                 )
-
                 return STATUS_DRY_RUN
 
             applied_payload = self.paperless.update_document_metadata_by_names(
@@ -354,6 +352,7 @@ class DocumentClassifier:
             self.db.insert_document(
                 paperless_id=document_id,
                 file_hash=file_hash,
+                ocr_hash=ocr_hash,
                 title=result.title,
                 correspondent=result.correspondent,
                 document_type=result.document_type,
@@ -367,7 +366,6 @@ class DocumentClassifier:
                 status=STATUS_AUTO_APPROVED,
                 error_message=f"Auto-approved and applied to Paperless: {applied_payload}",
             )
-
             return STATUS_AUTO_APPROVED
 
         except requests.RequestException as exc:
@@ -377,7 +375,6 @@ class DocumentClassifier:
                 status=STATUS_FAILED_API,
             )
             raise
-
         except Exception as exc:
             self.db.mark_failed(
                 paperless_id=document_id,
