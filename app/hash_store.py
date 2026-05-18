@@ -1,38 +1,33 @@
-"""
-Persistent hash store for duplicate detection.
+"""Hash helpers for duplicate detection."""
 
-Stores SHA256 hashes of already exported documents
-to prevent duplicate processing and exports.
-"""
+from __future__ import annotations
 
-import json
 import hashlib
-from pathlib import Path
-from typing import Optional
-
-
-class HashStore:
-    def __init__(self, base_path: str) -> None:
-        self.store_file = Path(base_path) / ".hashes.json"
-        self.hashes = self._load()
-
-    def _load(self) -> dict:
-        if not self.store_file.exists():
-            return {}
-        return json.loads(self.store_file.read_text())
-
-    def save(self) -> None:
-        self.store_file.write_text(
-            json.dumps(self.hashes, indent=2)
-        )
-
-    def exists(self, file_hash: str) -> bool:
-        return file_hash in self.hashes
-
-    def add(self, file_hash: str, path: str) -> None:
-        self.hashes[file_hash] = path
-        self.save()
+import re
+import unicodedata
 
 
 def sha256(data: bytes) -> str:
+    """Return SHA256 for raw bytes."""
     return hashlib.sha256(data).hexdigest()
+
+
+def normalize_ocr_text(content: str) -> str:
+    """Normalize OCR text so visually identical scans produce similar hashes.
+
+    The PDF hash catches exact binary duplicates. The OCR hash catches probable
+    duplicates where the PDF bytes differ but the recognized text is effectively
+    the same.
+    """
+    text = unicodedata.normalize("NFKC", content or "")
+    text = text.lower()
+    text = text.replace("\u00ad", "")
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"[^a-z0-9äöüß€.,:;@/()\- ]", "", text)
+    return text.strip()
+
+
+def ocr_sha256(content: str) -> str:
+    """Return SHA256 for normalized OCR text."""
+    normalized = normalize_ocr_text(content)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()

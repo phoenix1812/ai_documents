@@ -1,72 +1,126 @@
 {% extends "base.html" %}
 {% block title %}Dokumente · AI Documents{% endblock %}
-
 {% block content %}
-<header class="header">
-    <div>
-        <h1>{{ headline or "Alle Dokumente" }}</h1>
-        <p>{{ subline or "Audit-Ansicht: auch automatisch freigegebene Dokumente können nachträglich bearbeitet werden." }}</p>
-    </div>
-</header>
+<div class="page-shell wide">
+  <section class="page-heading">
+    <h1>{{ headline or "Alle Dokumente" }}</h1>
+    <p>{{ subline or "Audit-Ansicht: auch automatisch freigegebene Dokumente können nachträglich bearbeitet werden." }}</p>
+  </section>
 
-<section class="panel">
-    <form method="get" action="/documents" class="filter-form">
-        <label>
-            Suche
-            <input type="text" name="q" value="{{ query }}" placeholder="Titel, Korrespondent, Tag, Paperless-ID">
-        </label>
+  <section class="filter-card">
+    <form class="filter-grid" method="get" action="/documents">
+      <label class="field field-search">
+        <span>Suche</span>
+        <div class="input-with-icon">
+          <input type="text" name="q" value="{{ query or '' }}" placeholder="Titel, Korrespondent, Tag, Paperless-ID, DB-ID...">
+          <span class="input-icon">⌕</span>
+        </div>
+      </label>
 
-        <label>
-            Status
-            <select name="status">
-                <option value="">Alle</option>
-                {% for status in status_filters %}
-                    <option value="{{ status }}" {% if selected_status == status %}selected{% endif %}>{{ status }}</option>
-                {% endfor %}
-            </select>
-        </label>
+      <label class="field">
+        <span>Status</span>
+        <select name="status">
+          <option value="" {% if not selected_status %}selected{% endif %}>Alle</option>
+          {% for status in status_filters %}
+            <option value="{{ status }}" {% if selected_status == status %}selected{% endif %}>{{ status }}</option>
+          {% endfor %}
+        </select>
+      </label>
 
-        <button class="button" type="submit">Filtern</button>
-        <a class="button secondary" href="/documents">Zurücksetzen</a>
+      <label class="field">
+        <span>Typ</span>
+        <select name="document_type">
+          <option value="">Alle</option>
+          <option value="Rechnung">Rechnung</option>
+          <option value="Vertrag">Vertrag</option>
+          <option value="Versicherung">Versicherung</option>
+          <option value="Steuer">Steuer</option>
+          <option value="Bank">Bank</option>
+          <option value="Sonstiges">Sonstiges</option>
+        </select>
+      </label>
+
+      <label class="field">
+        <span>Zeitraum</span>
+        <select name="period">
+          <option value="">Alle</option>
+          <option value="7">Letzte 7 Tage</option>
+          <option value="30">Letzte 30 Tage</option>
+          <option value="90">Letzte 90 Tage</option>
+        </select>
+      </label>
+
+      <button class="button filter-button" type="submit">⌯ Filtern</button>
+      <a class="button secondary reset-button" href="/documents">↻ Zurücksetzen</a>
     </form>
-</section>
+  </section>
 
-{% if not items %}
-    <section class="empty">
+  <section class="table-card">
+    {% if not items %}
+      <div class="empty-state">
         <h2>Keine Dokumente gefunden</h2>
-    </section>
-{% else %}
-    <section class="panel">
-        <table>
-            <thead>
-                <tr>
-                    <th>DB-ID</th>
-                    <th>Paperless</th>
-                    <th>Status</th>
-                    <th>Titel</th>
-                    <th>Typ</th>
-                    <th>Korrespondent</th>
-                    <th>Tags</th>
-                    <th>Confidence</th>
-                    <th>Aktion</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for item in items %}
-                    <tr>
-                        <td><a href="/items/{{ item.id }}">{{ item.id }}</a></td>
-                        <td>{{ item.paperless_id }}</td>
-                        <td><span class="badge">{{ item.status }}</span></td>
-                        <td>{{ item.title or item.original_title or "—" }}</td>
-                        <td>{{ item.document_type or "—" }}</td>
-                        <td>{{ item.correspondent or "—" }}</td>
-                        <td>{{ item.tags_display or "—" }}</td>
-                        <td><span class="confidence {{ item.confidence_class }}">{{ item.confidence_display }}</span></td>
-                        <td><a class="button small" href="/items/{{ item.id }}">Bearbeiten</a></td>
-                    </tr>
-                {% endfor %}
-            </tbody>
+        <p>Ändere die Filter oder setze die Suche zurück.</p>
+      </div>
+    {% else %}
+      <div class="table-scroll">
+        <table class="documents-table">
+          <thead>
+            <tr>
+              <th>DB-ID</th>
+              <th>Paperless-ID</th>
+              <th>Status</th>
+              <th>Titel</th>
+              <th>Typ</th>
+              <th>Korrespondent</th>
+              <th>Tags</th>
+              <th>Confidence</th>
+              <th>Aktion</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in items %}
+              <tr>
+                <td><a class="id-link" href="/items/{{ item.id }}">{{ item.id }}</a></td>
+                <td>{{ item.paperless_id }}</td>
+                <td><span class="badge status-{{ (item.status or 'unknown')|lower|replace('_', '-') }}">{{ item.status }}</span></td>
+                <td class="title-cell">{{ item.title or item.original_title or "—" }}</td>
+                <td>{{ item.document_type or "—" }}</td>
+                <td>{{ item.correspondent or "—" }}</td>
+                <td>
+                  <div class="tag-list">
+                    {% if item.tags_list %}
+                      {% for tag in item.tags_list %}
+                        <span class="tag-pill">{{ tag }}</span>
+                      {% endfor %}
+                    {% elif item.tags_display %}
+                      {% for tag in item.tags_display.split(',') %}
+                        <span class="tag-pill">{{ tag.strip() }}</span>
+                      {% endfor %}
+                    {% else %}
+                      <span class="muted">—</span>
+                    {% endif %}
+                  </div>
+                </td>
+                <td><span class="confidence {{ item.confidence_class or '' }}">{{ item.confidence_display }}</span></td>
+                <td><a class="button small secondary" href="/items/{{ item.id }}">Bearbeiten</a></td>
+              </tr>
+            {% endfor %}
+          </tbody>
         </table>
-    </section>
-{% endif %}
+      </div>
+
+      <div class="table-footer">
+        <span>Zeige 1 bis {{ items|length }} von {{ items|length }} Einträgen</span>
+        <div class="pager">
+          <span>Zeige</span>
+          <select aria-label="Einträge pro Seite"><option>25</option></select>
+          <span>pro Seite</span>
+          <span class="pager-arrow">‹</span>
+          <span class="pager-current">1</span>
+          <span class="pager-arrow">›</span>
+        </div>
+      </div>
+    {% endif %}
+  </section>
+</div>
 {% endblock %}

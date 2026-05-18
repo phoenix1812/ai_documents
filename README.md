@@ -4,7 +4,7 @@ AI Documents ist ein lokaler, eventbasierter Dokumenten-Klassifizierer für **pa
 
 Nach dem Import eines Dokuments ruft Paperless einen Post-Consume-Hook auf. Dieser triggert einen kleinen Python-HTTP-Service, der das Dokument aus Paperless lädt, den OCR-Text mit **Ollama** klassifiziert, das Ergebnis validiert und die Metadaten direkt in Paperless aktualisiert.
 
-Paperless bleibt dabei die **Single Source of Truth**. PDFs werden nicht mehr zusätzlich exportiert.
+Paperless bleibt dabei die **Single Source of Truth**. PDFs werden nicht zusätzlich exportiert.
 
 ---
 
@@ -21,7 +21,9 @@ Paperless bleibt dabei die **Single Source of Truth**. PDFs werden nicht mehr zu
 - Serverseitige Titelgenerierung mit `_` statt Leerzeichen
 - Keine Review- oder Workflow-Tags in Paperless
 - Review-Status ausschließlich in SQLite und Review-UI
-- Duplikaterkennung per SHA256-Dateihash
+- Verarbeitung über eine zentrale Single-Worker-Queue
+- Duplikaterkennung per PDF-SHA256
+- Zusätzliche wahrscheinliche Duplikaterkennung per normalisiertem OCR-SHA256
 - Persistenter Verarbeitungsstatus in SQLite
 - Docker-Compose-Setup mit Paperless, PostgreSQL, Redis, Ollama, AI-Worker und Review-UI
 
@@ -40,6 +42,11 @@ scripts/post-consume-ai-worker.sh
   v
 app/main.py
   |
+  | enqueue(document_id)
+  v
+app/document_queue.py
+  |
+  | exactly one document at a time
   v
 app/worker.py
   |
@@ -47,12 +54,80 @@ app/worker.py
 app/classifier.py
   |
   +--> Paperless API: Dokument + OCR + PDF-Bytes laden
-  +--> SHA256: Duplikate erkennen
+  +--> PDF-SHA256: exakte Duplikate erkennen
+  +--> OCR-SHA256: wahrscheinliche Duplikate erkennen
   +--> Ollama: OCR-Text klassifizieren
   +--> classifier.py: stabilen Titel bauen
   +--> Validator: Ergebnis prüfen
   +--> Paperless API: Metadaten aktualisieren
   +--> SQLite: Status für Review-UI protokollieren
+```
+
+---
+
+## Queue-Verarbeitung
+
+`/process` startet keinen eigenen Thread pro Dokument mehr. Stattdessen wird die `document_id` in eine zentrale Queue gelegt.
+
+Vorteile:
+
+- keine parallelen Ollama-Aufrufe
+- weniger SQLite-Lock-Probleme
+- keine Race Conditions beim gleichen Dokument
+- Paperless bekommt sofort HTTP `202 Accepted`
+- die Verarbeitung läuft trotzdem asynchron weiter
+
+Der Healthcheck zeigt den Queue-Zustand:
+
+```bash
+curl http://localhost:8080/health
+```
+
+Beispiel:
+
+```json
+{
+  "status": "ok",
+  "queue": {
+    "current_document_id": 123,
+    "queue_size": 2,
+    "queued_or_running": [123, 124, 125]
+  }
+}
+```
+
+---
+
+## Duplikaterkennung
+
+Es gibt jetzt zwei Stufen:
+
+### 1. Exaktes Duplikat per PDF-Hash
+
+```text
+sha256(PDF-Bytes)
+```
+
+Erkennt identische Dateien.
+
+### 2. Wahrscheinliches Duplikat per OCR-Hash
+
+```text
+sha256(normalisierter OCR-Text)
+```
+
+Erkennt Fälle, in denen die PDF-Datei anders ist, aber der Text praktisch gleich bleibt, z. B.:
+
+- neu gescannte Kopie
+- andere PDF-Kompression
+- neu erzeugte PDF-Datei mit gleichem Inhalt
+
+In SQLite werden zusätzlich gespeichert:
+
+```text
+ocr_hash
+duplicate_of_paperless_id
+duplicate_reason
 ```
 
 ---
@@ -78,6 +153,7 @@ IGNORED
 MANUALLY_APPROVED
 NEEDS_REVIEW
 REVIEW_REQUIRED
+SKIPPED_DUPLICATE
 ```
 
 Dadurch landen keine technischen Tags wie `ai_review`, `needs-ai-review` oder `review` in Paperless.
@@ -119,12 +195,14 @@ Regeln:
 .
 ├── app/
 │   ├── main.py
+│   ├── document_queue.py
 │   ├── worker.py
 │   ├── classifier.py
 │   ├── paperless_client.py
 │   ├── ollama_client.py
 │   ├── validator.py
 │   ├── db.py
+│   ├── hash_store.py
 │   ├── models.py
 │   ├── prompts.py
 │   └── logging_config.py
@@ -142,80 +220,10 @@ Hinweis: `app/exporter.py` wird für diese Variante nicht mehr benötigt, weil k
 
 ---
 
-## Voraussetzungen
-
-- Docker und Docker Compose
-- Ein lokal lauffähiges Ollama-Modell
-- Paperless API Token
-
-Empfohlenes Modell für den Start:
-
-```bash
-docker exec -it ollama ollama pull llama3
-```
-
-Alternativ kannst du kleinere oder spezialisierte Modelle verwenden, z. B. `llama3.1`, `mistral`, `qwen2.5` oder ein deutschsprachig stärkeres Modell.
-
----
-
-## Konfiguration
-
-Lege im Projektverzeichnis eine `.env` Datei an. Du kannst `.env.example` kopieren:
-
-```bash
-cp .env.example .env
-```
-
-Beispiel:
-
-```env
-PAPERLESS_URL=http://paperless:8000
-PAPERLESS_PUBLIC_URL=http://localhost:8000
-PAPERLESS_TOKEN=DEIN_PAPERLESS_API_TOKEN
-OLLAMA_URL=http://ollama:11434
-OLLAMA_MODEL=llama3
-DB_PATH=/data
-CONFIDENCE_THRESHOLD=0.75
-MIN_TITLE_LENGTH=8
-DRY_RUN=false
-TRIGGER_PORT=8080
-REVIEW_UI_PORT=8090
-```
-
-### Wichtige Variablen
-
-| Variable | Beschreibung | Standard |
-|---|---|---|
-| `PAPERLESS_URL` | interne Paperless-URL im Docker-Netzwerk | `http://localhost:8000` |
-| `PAPERLESS_PUBLIC_URL` | URL für Links in der Review-UI | Wert von `PAPERLESS_URL` |
-| `PAPERLESS_TOKEN` | Paperless API Token | leer |
-| `OLLAMA_URL` | Ollama API URL | `http://ollama:11434` |
-| `OLLAMA_MODEL` | Modell für Klassifizierung | `llama3` |
-| `DB_PATH` | Pfad für SQLite-Datenbank | `/data` |
-| `CONFIDENCE_THRESHOLD` | Mindestvertrauen für Auto-Approval | `0.75` |
-| `MIN_TITLE_LENGTH` | Mindestlänge für automatisch akzeptierte Titel | `8` |
-| `DRY_RUN` | Klassifizierung speichern, aber Paperless nicht ändern | `false` |
-| `TRIGGER_PORT` | Port des AI-Worker HTTP-Servers | `8080` |
-| `REVIEW_UI_PORT` | Port der Review-UI | `8090` |
-
----
-
 ## Start
 
 ```bash
 docker compose up -d --build
-```
-
-Danach Paperless öffnen:
-
-```text
-http://localhost:8000
-```
-
-Review-UI öffnen:
-
-```text
-http://localhost:8090
 ```
 
 ---
@@ -244,61 +252,6 @@ curl -X POST "http://localhost:8080/process?document_id=123"
 
 ---
 
-## Review-Logik
-
-Ein Dokument landet in der Review-UI, wenn z. B.:
-
-- die Confidence zu niedrig ist
-- der Titel zu kurz oder generisch ist
-- Platzhalter wie `Unbekannt`, `Unbenannt`, `Sonstiges` verwendet wurden
-- der Dokumenttyp nicht zur erlaubten Taxonomie passt
-- ein technischer Workflow-Tag erkannt wurde
-
-Wichtig: Der Review-Zustand wird nicht in Paperless geschrieben. Es gibt also kein `ai_review`-Tag und kein `[Review]` im Titel.
-
----
-
-## Erlaubte Dokumenttypen
-
-Aktuell sind folgende Dokumenttypen vorgesehen:
-
-- `Rechnung`
-- `Vertrag`
-- `Versicherung`
-- `Steuer`
-- `Bank`
-- `Sonstiges`
-
-Die Liste kann in `app/validator.py` und `app/prompts.py` angepasst werden.
-
----
-
-## Entwicklung
-
-### Abhängigkeiten lokal installieren
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-Unter Windows PowerShell:
-
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-```
-
-### Tests ausführen
-
-```bash
-pytest
-```
-
----
-
 ## Sicherheitshinweise
 
 - `PAPERLESS_TOKEN` niemals committen
@@ -307,9 +260,3 @@ pytest
 - Den AI-Worker nicht öffentlich ins Internet stellen
 - LLM-Ausgaben immer validieren, bevor Metadaten geändert werden
 - Paperless bleibt die primäre Dokumentenablage
-
----
-
-## Status
-
-Das Projekt ist ein funktionaler Prototyp für lokale, KI-gestützte Dokumentenklassifizierung mit Paperless und Ollama.
