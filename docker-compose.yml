@@ -26,8 +26,6 @@ services:
     image: ollama/ollama:latest
     container_name: ollama
     restart: unless-stopped
-    ports:
-      - "11434:11434"
     volumes:
       - ./ollama:/root/.ollama
 
@@ -42,28 +40,36 @@ services:
       - redis
       - db
       - ai-worker
+
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
+
     environment:
       PAPERLESS_REDIS: redis://redis:6379
-      paperless:
       PAPERLESS_DBHOST: ${PAPERLESS_DBHOST:-db}
       PAPERLESS_DBNAME: ${POSTGRES_DB:-paperless}
       PAPERLESS_DBUSER: ${POSTGRES_USER:-paperless}
       PAPERLESS_DBPASS: ${POSTGRES_PASSWORD}
+
       PAPERLESS_TIME_ZONE: Europe/Berlin
       PAPERLESS_OCR_LANGUAGE: deu+eng
       PAPERLESS_OCR_LANGUAGES: deu eng
+
       PAPERLESS_ADMIN_USER: ${PAPERLESS_ADMIN_USER:-admin}
       PAPERLESS_ADMIN_PASSWORD: ${PAPERLESS_ADMIN_PASSWORD:-changeme}
+
       PAPERLESS_CONSUMER_POLLING: 5
+
       PAPERLESS_FILENAME_FORMAT: >
         {{ created_year }}/{{ correspondent }}/{{ document_type }}/{{ title }}
+
       PAPERLESS_OCR_ROTATE_PAGES: true
       PAPERLESS_OCR_DESKEW: true
       PAPERLESS_OCR_CLEAN: clean
+
       PAPERLESS_POST_CONSUME_SCRIPT: /usr/src/paperless/scripts/post-consume-ai-worker.sh
       AI_WORKER_TRIGGER_URL: http://ai-worker:8080/process
+
     volumes:
       - ${PAPERLESS_CONSUME_PATH:-./paperless-consume}:/usr/src/paperless/consume
       - ${PAPERLESS_DATA_PATH:-./paperless-data}:/usr/src/paperless/data
@@ -77,33 +83,46 @@ services:
     build: .
     container_name: ai-worker
     restart: unless-stopped
+
     depends_on:
       - ollama
+
     env_file:
       - .env
+
     environment:
       OLLAMA_URL: http://ollama:11434
       PAPERLESS_URL: http://paperless:8000
       TRIGGER_PORT: 8080
+
     volumes:
       - ./data:/data
 
+  # -------------------------
+  # REVIEW UI
+  # -------------------------
   ai-review-ui:
     build: .
     container_name: ai-review-ui
     restart: unless-stopped
+
     depends_on:
       - ai-worker
       - paperless
+
     env_file:
       - .env
+
     environment:
       OLLAMA_URL: http://ollama:11434
       PAPERLESS_URL: http://paperless:8000
       REVIEW_UI_PORT: 8090
+
     ports:
-      - "8090:8090"
+      - "127.0.0.1:8090:8090"
+
     volumes:
       - ./data:/data
+
     command: >
       uvicorn app.review_ui:app --host 0.0.0.0 --port 8090
