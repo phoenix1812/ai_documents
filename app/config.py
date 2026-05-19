@@ -36,6 +36,11 @@ class Settings:
             "http://ollama:11434",
         )
 
+        self.db_path = os.getenv(
+            "SQLITE_PATH", 
+            "/data/documents.db"
+        )
+
         # Paths
         self.db_path = os.getenv(
             "DB_PATH",
@@ -85,6 +90,8 @@ class Settings:
                 "8090",
             )
         )
+        self.review_ui_username = os.getenv("REVIEW_UI_USERNAME", "")
+        self.review_ui_password = os.getenv("REVIEW_UI_PASSWORD", "")
 
 
 settings = Settings()

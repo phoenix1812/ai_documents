@@ -9,13 +9,15 @@ Includes:
 - editing approved documents
 - manual reprocess
 - review learning
+- HTTP Basic Auth
 """
 
-import json
+import secrets
 from typing import Any
 
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -37,7 +39,44 @@ from app.paperless_client import PaperlessClient
 from app.reprocess import reprocess_paperless_document, retry_failed_document
 
 
-app = FastAPI(title="AI Documents Review UI")
+security = HTTPBasic()
+
+
+def require_review_auth(
+    credentials: HTTPBasicCredentials = Depends(security),
+) -> str:
+    expected_username = settings.review_ui_username
+    expected_password = settings.review_ui_password
+
+    if not expected_username or not expected_password:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Review UI auth is not configured",
+        )
+
+    username_ok = secrets.compare_digest(
+        credentials.username,
+        expected_username,
+    )
+    password_ok = secrets.compare_digest(
+        credentials.password,
+        expected_password,
+    )
+
+    if not username_ok or not password_ok:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Review UI credentials",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+
+    return credentials.username
+
+
+app = FastAPI(
+    title="AI Documents Review UI",
+    dependencies=[Depends(require_review_auth)],
+)
 
 templates = Jinja2Templates(directory="app/templates")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
@@ -66,6 +105,7 @@ def parse_tags(value: Any) -> list[str]:
 def format_confidence(value: Any) -> str:
     if value is None:
         return "—"
+
     try:
         return f"{float(value) * 100:.0f} %"
     except (TypeError, ValueError):
@@ -80,8 +120,10 @@ def confidence_class(value: Any) -> str:
 
     if confidence >= 0.90:
         return "high"
+
     if confidence >= 0.70:
         return "medium"
+
     return "low"
 
 
@@ -102,17 +144,24 @@ def normalize_item(item: dict[str, Any] | None) -> dict[str, Any] | None:
         STATUS_REVIEW_REQUIRED,
         STATUS_DRY_RUN,
     }
+
     return item
 
 
 def normalize_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [item for raw in items if (item := normalize_item(raw)) is not None]
+    return [
+        item
+        for raw in items
+        if (item := normalize_item(raw)) is not None
+    ]
 
 
 def get_item_or_404(document_db_id: int) -> dict[str, Any]:
     item = normalize_item(get_db().get_document_row(document_db_id))
+
     if item is None:
         raise HTTPException(status_code=404, detail="Document not found")
+
     return item
 
 
@@ -127,6 +176,7 @@ def save_correction(
     reason: str | None = None,
 ) -> None:
     db = get_db()
+
     db.insert_review_decision(
         document_db_id=item_id,
         paperless_id=int(item["paperless_id"]),
@@ -166,6 +216,7 @@ def documents(
     q: str | None = None,
 ):
     db = get_db()
+
     items = normalize_items(
         db.list_documents(
             status=status,
@@ -211,6 +262,7 @@ def review_queue(request: Request, status: str | None = None):
 @app.get("/auto-approved")
 def auto_approved(request: Request):
     db = get_db()
+
     items = normalize_items(
         db.list_by_statuses((STATUS_AUTO_APPROVED,), limit=100)
     )
@@ -224,7 +276,10 @@ def auto_approved(request: Request):
             "query": "",
             "status_filters": ALL_STATUS_FILTERS,
             "headline": "Letzte Auto-Approvals",
-            "subline": "Hier kannst du automatisch freigegebene Dokumente nachträglich prüfen und korrigieren.",
+            "subline": (
+                "Hier kannst du automatisch freigegebene Dokumente "
+                "nachträglich prüfen und korrigieren."
+            ),
         },
     )
 
@@ -421,6 +476,7 @@ def retry_failed(item_id: int):
         )
 
     retry_failed_document(item_id)
+
     return RedirectResponse("/failed", status_code=303)
 
 
@@ -443,6 +499,7 @@ def reprocess_submit(
 ):
     try:
         result = reprocess_paperless_document(int(paperless_id))
+
         return templates.TemplateResponse(
             "reprocess.html",
             {
@@ -479,4 +536,7 @@ def learning(request: Request):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "db_path": settings.db_path}
+    return {
+        "status": "ok",
+        "db_path": settings.db_path,
+    }
