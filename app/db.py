@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -186,6 +186,37 @@ class Database:
             )
             """
         )
+
+        # Persistent queue for crash-safe asynchronous processing.
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id INTEGER NOT NULL UNIQUE,
+                status TEXT NOT NULL DEFAULT 'QUEUED',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 10,
+                available_at TEXT NOT NULL,
+                locked_at TEXT,
+                started_at TEXT,
+                finished_at TEXT,
+                last_error TEXT,
+                result_status TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status_available ON jobs (status, available_at)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_document_id ON jobs (document_id)")
 
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_paperless_id ON documents (paperless_id)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_file_hash ON documents (file_hash)")
@@ -596,6 +627,169 @@ class Database:
         if row is None:
             return "unknown"
         return str(row[0])
+
+    # ------------------------------------------------------------------
+    # Persistent job queue and reconciliation metadata
+    # ------------------------------------------------------------------
+    def enqueue_job(self, document_id: int, max_attempts: int = 10) -> bool:
+        if document_id <= 0:
+            raise ValueError("document_id must be greater than 0")
+        existing = self.conn.execute(
+            "SELECT status FROM jobs WHERE document_id = ?", (document_id,)
+        ).fetchone()
+        if existing is not None:
+            return False
+        now = self._now()
+        self.conn.execute(
+            """
+            INSERT INTO jobs (
+                document_id, status, attempts, max_attempts,
+                available_at, created_at, updated_at
+            ) VALUES (?, 'QUEUED', 0, ?, ?, ?, ?)
+            """,
+            (document_id, max_attempts, now, now, now),
+        )
+        self.conn.commit()
+        return True
+
+    def recover_stale_jobs(self, stale_after_seconds: int = 900) -> int:
+        cutoff = (datetime.utcnow() - timedelta(seconds=stale_after_seconds)).isoformat(timespec="seconds")
+        now = self._now()
+        cur = self.conn.execute(
+            """
+            UPDATE jobs
+               SET status = 'QUEUED',
+                   locked_at = NULL,
+                   started_at = NULL,
+                   available_at = ?,
+                   updated_at = ?,
+                   last_error = COALESCE(last_error, 'Recovered after worker restart')
+             WHERE status = 'PROCESSING'
+               AND locked_at IS NOT NULL
+               AND locked_at < ?
+            """,
+            (now, now, cutoff),
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    def claim_next_job(self) -> dict[str, Any] | None:
+        now = self._now()
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.conn.execute(
+                """
+                SELECT * FROM jobs
+                 WHERE status IN ('QUEUED', 'RETRY')
+                   AND available_at <= ?
+                 ORDER BY id ASC
+                 LIMIT 1
+                """,
+                (now,),
+            ).fetchone()
+            if row is None:
+                self.conn.commit()
+                return None
+            self.conn.execute(
+                """
+                UPDATE jobs
+                   SET status = 'PROCESSING', attempts = attempts + 1,
+                       locked_at = ?, started_at = ?, updated_at = ?
+                 WHERE id = ?
+                """,
+                (now, now, now, row["id"]),
+            )
+            self.conn.commit()
+            updated = self.conn.execute("SELECT * FROM jobs WHERE id = ?", (row["id"],)).fetchone()
+            return self.row_to_dict(updated)
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def finish_job(self, job_id: int, result_status: str) -> None:
+        now = self._now()
+        self.conn.execute(
+            """
+            UPDATE jobs
+               SET status='DONE', result_status=?, finished_at=?,
+                   locked_at=NULL, updated_at=?
+             WHERE id=?
+            """,
+            (result_status, now, now, job_id),
+        )
+        self.conn.commit()
+
+    def fail_job(self, job_id: int, error: str, backoff_seconds: int) -> bool:
+        row = self.conn.execute(
+            "SELECT attempts, max_attempts FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        now = self._now()
+        if int(row["attempts"]) >= int(row["max_attempts"]):
+            self.conn.execute(
+                """
+                UPDATE jobs SET status='DEAD', last_error=?, locked_at=NULL,
+                    finished_at=?, updated_at=? WHERE id=?
+                """,
+                (error[:4000], now, now, job_id),
+            )
+            self.conn.commit()
+            return False
+        next_time = (datetime.utcnow() + timedelta(seconds=backoff_seconds)).isoformat(timespec="seconds")
+        self.conn.execute(
+            """
+            UPDATE jobs SET status='RETRY', last_error=?, locked_at=NULL,
+                available_at=?, updated_at=? WHERE id=?
+            """,
+            (error[:4000], next_time, now, job_id),
+        )
+        self.conn.commit()
+        return True
+
+    def queue_snapshot(self) -> dict[str, Any]:
+        counts = self.conn.execute(
+            """
+            SELECT
+                SUM(CASE WHEN status IN ('QUEUED','RETRY') THEN 1 ELSE 0 END) AS queued,
+                SUM(CASE WHEN status='PROCESSING' THEN 1 ELSE 0 END) AS processing,
+                SUM(CASE WHEN status='DEAD' THEN 1 ELSE 0 END) AS dead,
+                SUM(CASE WHEN status='DONE' THEN 1 ELSE 0 END) AS done
+            FROM jobs
+            """
+        ).fetchone()
+        rows = self.conn.execute(
+            """
+            SELECT document_id, status, attempts, available_at, last_error
+            FROM jobs
+            WHERE status IN ('QUEUED','RETRY','PROCESSING','DEAD')
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        current = next((dict(r) for r in rows if r["status"] == "PROCESSING"), None)
+        return {
+            "current_document_id": current["document_id"] if current else None,
+            "queue_size": int(counts["queued"] or 0),
+            "processing": int(counts["processing"] or 0),
+            "dead": int(counts["dead"] or 0),
+            "done": int(counts["done"] or 0),
+            "queued_or_running": [int(r["document_id"]) for r in rows if r["status"] in ("QUEUED", "RETRY", "PROCESSING")],
+            "dead_jobs": [dict(r) for r in rows if r["status"] == "DEAD"],
+        }
+
+    def get_meta(self, key: str) -> str | None:
+        row = self.conn.execute("SELECT value FROM app_meta WHERE key=?", (key,)).fetchone()
+        return None if row is None else str(row["value"])
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO app_meta(key,value) VALUES(?,?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            """,
+            (key, value),
+        )
+        self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()

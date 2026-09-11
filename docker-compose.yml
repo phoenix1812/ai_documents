@@ -1,17 +1,12 @@
 services:
-  # -------------------------
-  # REDIS
-  # -------------------------
   redis:
     image: redis:7
     container_name: redis
     restart: unless-stopped
 
-  # -------------------------
-  # POSTGRES
-  # -------------------------
   db:
     image: postgres:16
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-paperless}
       POSTGRES_USER: ${POSTGRES_USER:-paperless}
@@ -19,9 +14,6 @@ services:
     volumes:
       - ${POSTGRES_DATA_PATH:-./data/postgres}:/var/lib/postgresql/data
 
-  # -------------------------
-  # OLLAMA
-  # -------------------------
   ollama:
     image: ollama/ollama:latest
     container_name: ollama
@@ -29,9 +21,6 @@ services:
     volumes:
       - ./ollama:/root/.ollama
 
-  # -------------------------
-  # PAPERLESS
-  # -------------------------
   paperless:
     image: ghcr.io/paperless-ngx/paperless-ngx:latest
     container_name: paperless
@@ -40,89 +29,81 @@ services:
       - redis
       - db
       - ai-worker
-
     ports:
       - "127.0.0.1:8000:8000"
-
     environment:
       PAPERLESS_REDIS: redis://redis:6379
       PAPERLESS_DBHOST: ${PAPERLESS_DBHOST:-db}
       PAPERLESS_DBNAME: ${POSTGRES_DB:-paperless}
       PAPERLESS_DBUSER: ${POSTGRES_USER:-paperless}
       PAPERLESS_DBPASS: ${POSTGRES_PASSWORD}
-
       PAPERLESS_TIME_ZONE: Europe/Berlin
       PAPERLESS_OCR_LANGUAGE: deu+eng
       PAPERLESS_OCR_LANGUAGES: deu eng
-
       PAPERLESS_ADMIN_USER: ${PAPERLESS_ADMIN_USER:-admin}
       PAPERLESS_ADMIN_PASSWORD: ${PAPERLESS_ADMIN_PASSWORD:-changeme}
-
       PAPERLESS_CONSUMER_POLLING: 5
-
       PAPERLESS_FILENAME_FORMAT: >
         {{ created_year }}/{{ correspondent }}/{{ document_type }}/{{ title }}
-
       PAPERLESS_OCR_ROTATE_PAGES: true
       PAPERLESS_OCR_DESKEW: true
       PAPERLESS_OCR_CLEAN: clean
-
       PAPERLESS_POST_CONSUME_SCRIPT: /usr/src/paperless/scripts/post-consume-ai-worker.sh
       AI_WORKER_TRIGGER_URL: http://ai-worker:8080/process
-
     volumes:
       - ${PAPERLESS_CONSUME_PATH:-./paperless-consume}:/usr/src/paperless/consume
       - ${PAPERLESS_DATA_PATH:-./paperless-data}:/usr/src/paperless/data
       - ${PAPERLESS_MEDIA_PATH:-./paperless-media}:/usr/src/paperless/media
       - ./scripts:/usr/src/paperless/scripts:ro
 
-  # -------------------------
-  # AI WORKER TRIGGER SERVER
-  # -------------------------
   ai-worker:
     build: .
     container_name: ai-worker
     restart: unless-stopped
-
     depends_on:
       - ollama
-
     env_file:
       - .env
-
     environment:
       OLLAMA_URL: http://ollama:11434
       PAPERLESS_URL: http://paperless:8000
       TRIGGER_PORT: 8080
-
+      DB_PATH: /data
+      RECONCILE_ENABLED: ${RECONCILE_ENABLED:-true}
+      RECONCILE_INITIAL_IMPORT: ${RECONCILE_INITIAL_IMPORT:-false}
+      RECONCILE_INTERVAL_SECONDS: ${RECONCILE_INTERVAL_SECONDS:-600}
+      QUEUE_MAX_ATTEMPTS: ${QUEUE_MAX_ATTEMPTS:-10}
+      QUEUE_STALE_AFTER_SECONDS: ${QUEUE_STALE_AFTER_SECONDS:-900}
+      RETRY_BASE_SECONDS: ${RETRY_BASE_SECONDS:-30}
+      RETRY_MAX_SECONDS: ${RETRY_MAX_SECONDS:-900}
     volumes:
       - ./data:/data
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
-  # -------------------------
-  # REVIEW UI
-  # -------------------------
   ai-review-ui:
     build: .
     container_name: ai-review-ui
     restart: unless-stopped
-
     depends_on:
       - ai-worker
       - paperless
-
     env_file:
       - .env
-
     environment:
       OLLAMA_URL: http://ollama:11434
       PAPERLESS_URL: http://paperless:8000
       REVIEW_UI_PORT: 8090
-
+      DB_PATH: /data
     ports:
       - "127.0.0.1:8090:8090"
-
     volumes:
       - ./data:/data
-
     command: >
       uvicorn app.review_ui:app --host 0.0.0.0 --port 8090
