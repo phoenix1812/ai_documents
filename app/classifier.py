@@ -226,7 +226,10 @@ class DocumentClassifier:
             file_bytes = self.paperless.download_document(document_id=document_id)
             file_hash = sha256(file_bytes)
 
-            existing_by_file_hash = self.db.get_by_file_hash(file_hash)
+            existing_by_file_hash = self.db.get_by_file_hash(
+                file_hash,
+                exclude_paperless_id=document_id,
+            )
             if existing_by_file_hash is not None:
                 logger.info("Duplicate skipped by PDF hash: %s", document_id)
                 return self._store_duplicate(
@@ -264,7 +267,10 @@ class DocumentClassifier:
                 return STATUS_FAILED_OCR
 
             ocr_hash = ocr_sha256(content)
-            existing_by_ocr_hash = self.db.get_by_ocr_hash(ocr_hash)
+            existing_by_ocr_hash = self.db.get_by_ocr_hash(
+                ocr_hash,
+                exclude_paperless_id=document_id,
+            )
             if existing_by_ocr_hash is not None:
                 logger.info("Probable duplicate skipped by OCR hash: %s", document_id)
                 return self._store_duplicate(

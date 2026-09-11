@@ -1,161 +1,126 @@
-# AI Documents – P0 Home/Production Hardening
+# AI Documents – P0/P1 Production/Home-Ready
 
-This package is designed for the current `phoenix1812/ai_documents` architecture. Paperless remains the source of truth; AI workflow state is stored locally in SQLite.
+The current tree implements the P0 reliability layer and the main P1 home-production hardening:
 
-## What P0 adds
+1. Persistent SQLite-backed processing queue.
+2. Recovery of jobs that were PROCESSING during a container crash/restart.
+3. Exponential retry with a configurable maximum attempt count.
+4. Periodic Paperless <-> AI database reconciliation.
+5. Real health/readiness checks for Paperless, Ollama and SQLite.
+6. Immediate trigger retries in the Paperless post-consume script.
+7. Automated backup/restore for SQLite, PostgreSQL, Paperless media and data.
+8. Ollama model-aware readiness checks.
+9. Explicit Paperless v3 secret key and NAS polling/stability configuration.
+10. Pinned Paperless/Ollama image versions.
+11. Queue safety tests for restart, health-check isolation, force-requeue and retry/dead states.
 
-1. Persistent SQLite job queue (`jobs`).
-2. Recovery of stale `PROCESSING` jobs after an AI-worker restart.
-3. Exponential retry/backoff for transient worker failures.
-4. Periodic Paperless reconciliation.
-5. Safe initial baseline: existing Paperless documents are NOT imported automatically when `RECONCILE_INITIAL_IMPORT=false`.
-6. `/health` and `/ready` endpoints.
-7. Docker healthcheck.
-8. Manual `/reconcile` endpoint; use `?include_existing=true` only when you intentionally want to import existing Paperless documents.
-9. Backup script for SQLite + PostgreSQL + Paperless data/media.
-10. Reset script that deletes only AI SQLite state and leaves Paperless intact.
+## Current implementation
 
-## Files to copy
+The files are already integrated in this repository. The following files contain the production changes:
 
-Replace these files in the repository:
 
-- `app/db.py`
+
 - `app/config.py`
-- `app/document_queue.py`
-- `app/worker.py`
 - `app/main.py`
+- `app/document_queue.py`
 - `docker-compose.yml`
 - `scripts/post-consume-ai-worker.sh`
 
-Add:
+The classifier, Paperless client and review UI remain unchanged in their core responsibilities.
 
-- `app/queue_store.py`
-- `app/reconciler.py`
-- `app/health.py`
-- `scripts/backup.sh`
-- `scripts/reset-ai-data.sh`
-- `P0.env.example`
+## Important
 
-Do not delete or replace the existing classifier, review UI, Paperless client, Ollama client, validator, templates, or static assets.
+The persistent queue uses the existing `./data/documents.db` file. It creates
+a new table called `processing_jobs` and is compatible with the existing
+SQLite database layer.
 
-## Clean initial start
+On startup:
 
-If the intention is a completely empty AI state while keeping all Paperless documents:
+- PROCESSING jobs are reset to QUEUED.
+- The worker resumes pending jobs.
+- After the initial delay, reconciliation scans Paperless and queues documents
+  that have not reached a final AI status.
+
+Failed jobs use exponential backoff:
+
+- 30 seconds
+- 60 seconds
+- 120 seconds
+- ...
+- capped by `QUEUE_RETRY_MAX_SECONDS`
+
+After `QUEUE_MAX_ATTEMPTS`, a job becomes `DEAD`. The existing Review UI can
+still be used to inspect/retry the corresponding failed document.
+
+## Recommended .env additions
+
+```env
+DB_PATH=/data
+
+QUEUE_POLL_INTERVAL_SECONDS=2
+QUEUE_MAX_ATTEMPTS=10
+QUEUE_RETRY_BASE_SECONDS=30
+QUEUE_RETRY_MAX_SECONDS=1800
+
+RECONCILIATION_INTERVAL_SECONDS=600
+RECONCILIATION_START_DELAY_SECONDS=30
+
+HEALTHCHECK_TIMEOUT_SECONDS=3
+```
+
+## Test after deployment
 
 ```bash
-chmod +x scripts/reset-ai-data.sh scripts/backup.sh
-./scripts/reset-ai-data.sh
-```
+docker compose up -d --build
 
-The reset removes:
-
-- `data/documents.db`
-- `data/documents.db-wal`
-- `data/documents.db-shm`
-
-It does NOT remove PostgreSQL, Paperless media, Paperless data, Redis, or Ollama models.
-
-After startup the SQLite database will contain the empty tables:
-
-- `documents`
-- `review_decisions`
-- `jobs`
-- `app_meta`
-
-## Initial reconciliation behaviour
-
-With:
-
-```text
-RECONCILE_INITIAL_IMPORT=false
-```
-
-the first reconciliation only establishes a baseline. Existing Paperless documents are not queued.
-
-New documents continue to be queued by the Paperless post-consume hook. The periodic reconciler also catches documents created after the baseline if a trigger was missed while the AI worker was unavailable.
-
-To deliberately import ALL existing Paperless documents, use:
-
-```bash
-curl -X POST 'http://127.0.0.1:8080/reconcile?include_existing=true'
-```
-
-## Verify the database
-
-```bash
-docker exec ai-worker python -c "import sqlite3; c=sqlite3.connect('/data/documents.db'); print(c.execute(\"SELECT name FROM sqlite_master WHERE type='table' ORDER BY name\").fetchall())"
-```
-
-Expected:
-
-```text
-app_meta
- documents
- jobs
- review_decisions
- sqlite_sequence
-```
-
-## Health
-
-```bash
 curl http://127.0.0.1:8080/health
-curl -i http://127.0.0.1:8080/ready
+curl http://127.0.0.1:8080/ready
+curl http://127.0.0.1:8080/live
 ```
 
-`/health` is a local process/database health endpoint. `/ready` also checks Paperless and Ollama.
-
-## Crash recovery test
-
-1. Trigger a document:
+Manual reconciliation:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/process \\
-  -H 'Content-Type: application/json' \\
+curl -X POST http://127.0.0.1:8080/reconcile
+```
+
+The trigger remains:
+
+```bash
+curl -X POST http://127.0.0.1:8080/process \
+  -H 'Content-Type: application/json' \
   -d '{"document_id": 123}'
 ```
 
-2. Check the job:
+## Crash recovery test
 
-```bash
-docker exec ai-worker python -c "import sqlite3; c=sqlite3.connect('/data/documents.db'); c.row_factory=sqlite3.Row; print([dict(r) for r in c.execute(\"SELECT * FROM jobs ORDER BY id DESC LIMIT 5\")])"
-```
-
-3. During processing restart the worker:
-
-```bash
-docker restart ai-worker
-```
-
-4. The job must reappear as `QUEUED`/`PROCESSING` and finish. It must not disappear.
-
-## Ollama outage test
-
-Stop Ollama, trigger a document, and inspect `jobs`:
-
-```bash
-docker stop ollama
-curl -X POST http://127.0.0.1:8080/process -H 'Content-Type: application/json' -d '{"document_id": 123}'
-```
-
-The job should enter `RETRY` with a future `available_at` value. Start Ollama again:
-
-```bash
-docker start ollama
-```
-
-The worker should retry automatically.
+1. Queue a document.
+2. While it is processing, run:
+   `docker compose restart ai-worker`
+3. Start the container again.
+4. Check `/health`.
+5. The job should return to QUEUED and be processed.
 
 ## Backup
 
-Run from the repository root:
+Make the script executable:
+
+```bash
+chmod +x scripts/backup.sh
+```
+
+Run:
 
 ```bash
 ./scripts/backup.sh
 ```
 
-The script creates a compressed backup containing AI SQLite state, a PostgreSQL dump, and Paperless data/media when the configured host directories exist.
+Recommended: execute it once per day with the Synology Task Scheduler or host
+cron. Store the `backups/` directory on a different physical storage target
+if possible.
 
-## Important
+## One deliberate design choice
 
-Do not expose the AI worker to the public Internet. The supplied compose file binds it to `127.0.0.1:8080` on the host. Paperless reaches it internally through `http://ai-worker:8080/process`.
+Paperless remains the source of truth. Reconciliation does not overwrite
+Paperless metadata; it only finds documents that have no final AI processing
+state and puts them into the persistent queue.

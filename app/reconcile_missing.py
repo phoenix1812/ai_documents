@@ -6,7 +6,7 @@ from urllib.parse import urlencode
 import requests
 
 from app.config import settings
-from app.reprocess import reprocess_paperless_document
+from app.reprocess import enqueue_paperless_document
 
 
 LIMIT = 100
@@ -22,8 +22,12 @@ def get_db_path() -> str:
     ]
 
     for path in candidates:
-        if path and os.path.exists(path):
-            return path
+        if not path:
+            continue
+
+        db_path = os.path.join(path, "documents.db") if os.path.isdir(path) else path
+        if os.path.exists(db_path):
+            return db_path
 
     raise RuntimeError(
         "Keine SQLite-Datenbank gefunden. Geprüft wurden: "
@@ -89,8 +93,8 @@ def main() -> None:
         print(f"➡️  Verarbeite Paperless-ID {paperless_id}: {title}")
 
         try:
-            reprocess_paperless_document(paperless_id)
-            print(f"✅ Paperless-ID {paperless_id} verarbeitet")
+            result = enqueue_paperless_document(paperless_id)
+            print(f"✅ Paperless-ID {paperless_id} eingereiht: {result}")
         except Exception as exc:
             print(f"❌ Fehler bei Paperless-ID {paperless_id}: {exc}")
 

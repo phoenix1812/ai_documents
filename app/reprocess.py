@@ -1,13 +1,29 @@
 """Reprocessing helpers used by the Review UI and future CLI/jobs."""
 
-from app.classifier import DocumentClassifier
+import requests
+
 from app.config import settings
 from app.db import Database
 
 
-def reprocess_paperless_document(paperless_id: int) -> str:
-    classifier = DocumentClassifier()
-    return classifier.process_document(paperless_id)
+def enqueue_paperless_document(paperless_id: int) -> str:
+    """Submit a document to the AI worker queue.
+
+    Review UI runs in a separate process/container from the trigger server, so
+    it must use the same HTTP boundary as Paperless instead of classifying
+    inline. That keeps Ollama calls serialized by app.document_queue.
+    """
+    response = requests.post(
+        settings.ai_worker_trigger_url,
+        json={"document_id": paperless_id},
+        timeout=10,
+    )
+    response.raise_for_status()
+
+    payload = response.json()
+    status = payload.get("status", "UNKNOWN")
+    queue_size = payload.get("queue_size", "unknown")
+    return f"{status} (queue_size={queue_size})"
 
 
 def retry_failed_document(document_db_id: int) -> str:
@@ -22,4 +38,4 @@ def retry_failed_document(document_db_id: int) -> str:
         raise ValueError(f"Document DB row has no paperless_id: {document_db_id}")
 
     db.increment_retry(document_db_id)
-    return reprocess_paperless_document(int(paperless_id))
+    return enqueue_paperless_document(int(paperless_id))

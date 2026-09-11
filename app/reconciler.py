@@ -1,71 +1,80 @@
-"""Periodic Paperless-to-AI queue reconciliation.
+"""Periodic reconciliation between Paperless and the AI processing database."""
 
-The first reconciliation establishes a baseline and intentionally does not import
-existing Paperless documents unless RECONCILE_INITIAL_IMPORT=true.
-"""
 from __future__ import annotations
-from datetime import datetime, timezone
+
 import logging
 import threading
+import time
+
 from app.config import settings
+from app.db import Database
 from app.paperless_client import PaperlessClient
-from app.queue_store import QueueStore
+from app.document_queue import DocumentProcessingQueue
 
 logger = logging.getLogger(__name__)
-BASELINE_KEY = "reconcile_baseline_at"
+
 
 class Reconciler:
-    def __init__(self, queue_store: QueueStore) -> None:
-        self.queue_store = queue_store
+    def __init__(self, processing_queue: DocumentProcessingQueue) -> None:
+        self.processing_queue = processing_queue
         self.paperless = PaperlessClient()
+        self.db = Database(settings.db_path)
         self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._loop, daemon=True, name="paperless-reconciler")
-
-    @staticmethod
-    def _now() -> str:
-        return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-    def reconcile(self, include_existing: bool = False) -> dict:
-        baseline = self.queue_store.get_meta(BASELINE_KEY)
-        if baseline is None and not include_existing and not settings.reconcile_initial_import:
-            now = self._now()
-            self.queue_store.set_meta(BASELINE_KEY, now)
-            logger.info("Reconciliation baseline initialized at %s; existing documents are not imported.", now)
-            return {"queued": 0, "baseline_initialized": True, "initial_import": False}
-
-        params = None if (include_existing or settings.reconcile_initial_import) else {"created__gte": baseline}
-        documents = self.paperless._get_paginated("/api/documents/", params=params)
-        known_ids = set()
-        # Only IDs already represented by a completed/terminal processing record are considered known.
-        rows = self.queue_store.db.conn.execute("SELECT paperless_id FROM documents WHERE paperless_id IS NOT NULL").fetchall()
-        known_ids = {int(row[0]) for row in rows}
-        queued = []
-        for document in documents:
-            document_id = int(document["id"])
-            if document_id not in known_ids:
-                self.queue_store.enqueue(document_id)
-                queued.append(document_id)
-
-        now = self._now()
-        self.queue_store.set_meta(BASELINE_KEY, now)
-        logger.info("Reconciliation finished: %s document(s) queued.", len(queued))
-        return {"queued": len(queued), "document_ids": queued, "baseline": now}
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name="paperless-reconciler",
+        )
 
     def start(self) -> None:
-        if not settings.reconcile_enabled:
-            logger.info("Reconciliation disabled by configuration.")
-            return
         self._thread.start()
-
-    def _loop(self) -> None:
-        # Give Paperless time to become available before the first scheduled run.
-        while not self._stop.wait(settings.reconcile_interval_seconds):
-            try:
-                self.reconcile()
-            except Exception:
-                logger.exception("Periodic reconciliation failed; will retry later.")
 
     def stop(self) -> None:
         self._stop.set()
-        if self._thread.is_alive():
-            self._thread.join(timeout=5)
+
+    def reconcile_once(self) -> dict[str, int]:
+        documents = self.paperless.get_documents()
+        queued = 0
+        already_known = 0
+        skipped = 0
+
+        for document in documents:
+            document_id = int(document["id"])
+
+            # FINAL_STATUSES includes approved, review, dry-run and ignored
+            # states. Failed documents are intentionally eligible for recovery.
+            if self.db.exists_paperless_id(document_id):
+                already_known += 1
+                continue
+
+            result = self.processing_queue.enqueue(document_id)
+            if result.queued:
+                queued += 1
+            else:
+                skipped += 1
+
+        logger.info(
+            "Reconciliation finished: Paperless=%s, queued=%s, known=%s, skipped=%s.",
+            len(documents),
+            queued,
+            already_known,
+            skipped,
+        )
+        return {
+            "paperless_documents": len(documents),
+            "queued": queued,
+            "already_known": already_known,
+            "skipped": skipped,
+        }
+
+    def _run(self) -> None:
+        # Give Paperless a little time during container startup.
+        time.sleep(max(0, settings.reconciliation_start_delay_seconds))
+
+        while not self._stop.is_set():
+            try:
+                self.reconcile_once()
+            except Exception:
+                logger.exception("Paperless reconciliation failed.")
+
+            self._stop.wait(max(30, settings.reconciliation_interval_seconds))
