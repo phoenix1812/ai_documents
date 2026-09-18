@@ -7,21 +7,53 @@ if [ -z "${DOCUMENT_ID:-}" ]; then
 fi
 
 python3 - <<'PY'
-import json, os, urllib.error, urllib.request
-url = os.environ.get("AI_WORKER_TRIGGER_URL", "http://ai-worker:8080/process")
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+url = os.environ.get(
+    "AI_WORKER_TRIGGER_URL",
+    "http://ai-worker:8080/process",
+)
+
 document_id = int(os.environ["DOCUMENT_ID"])
-payload = json.dumps({"document_id": document_id}).encode("utf-8")
+
+payload = json.dumps({
+    "document_id": document_id,
+}).encode("utf-8")
+
 request = urllib.request.Request(
-    url=url, data=payload,
-    headers={"Content-Type": "application/json", "Connection": "close"},
+    url=url,
+    data=payload,
+    headers={
+        "Content-Type": "application/json",
+        "Connection": "close",
+    },
     method="POST",
 )
-try:
-    with urllib.request.urlopen(request, timeout=3) as response:
-        print(f"AI worker accepted document {document_id}: HTTP {response.status} {response.read().decode('utf-8')}")
-except urllib.error.URLError as exc:
-    # Paperless must not fail merely because the asynchronous AI service is down.
-    # Reconciliation and/or the next explicit trigger will recover the document.
-    print(f"AI worker trigger failed for document {document_id}: {exc}", file=__import__('sys').stderr)
+
+for attempt in range(1, 4):
+    try:
+        # The server returns immediately with 202 and processes asynchronously.
+        with urllib.request.urlopen(request, timeout=3) as response:
+            body = response.read().decode("utf-8")
+            print(
+                f"AI worker accepted document {document_id}: "
+                f"HTTP {response.status} {body}"
+            )
+            sys.exit(0)
+    except urllib.error.URLError as exc:
+        print(
+            f"AI worker trigger attempt {attempt}/3 failed for document "
+            f"{document_id}: {exc}",
+            file=sys.stderr,
+        )
+        if attempt < 3:
+            import time
+            time.sleep(2 ** (attempt - 1))
+
+# Do not fail Paperless consumption because AI post-processing failed.
+sys.exit(0)
 PY
-exit 0

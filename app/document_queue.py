@@ -1,14 +1,26 @@
-"""Crash-safe single-worker persistent queue."""
+"""Single-worker persistent document processing queue."""
+
 from __future__ import annotations
+
 import logging
 import threading
 import time
 from dataclasses import dataclass
+
 from app.config import settings
-from app.queue_store import QueueStore
+from app.queue_store import PersistentQueueStore
 from app.worker import Worker
 
 logger = logging.getLogger(__name__)
+
+RETRY_STATUSES = {
+    "FAILED",
+    "FAILED_OCR",
+    "FAILED_LLM",
+    "FAILED_EXPORT",
+    "FAILED_API",
+}
+
 
 @dataclass(frozen=True)
 class QueueStatus:
@@ -18,68 +30,101 @@ class QueueStatus:
     status: str
     queue_size: int
 
+
 class DocumentProcessingQueue:
     def __init__(self, worker: Worker) -> None:
         self.worker = worker
-        self.store = QueueStore()
-        recovered = self.store.recover()
-        if recovered:
-            logger.warning("Recovered %s stale processing jobs after restart.", recovered)
+        self.store = PersistentQueueStore(settings.db_path, recover_processing=True)
+        self._stop = threading.Event()
         self._lock = threading.Lock()
         self._current_document_id: int | None = None
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True, name="document-processing-queue")
-        self._thread.start()
-
-    def enqueue(self, document_id: int) -> QueueStatus:
-        if document_id <= 0:
-            raise ValueError("document_id must be greater than 0")
-        inserted = self.store.enqueue(document_id)
-        snapshot = self.store.snapshot()
-        return QueueStatus(
-            document_id=document_id,
-            accepted=True,
-            queued=inserted,
-            status="QUEUED" if inserted else "ALREADY_QUEUED_OR_FINISHED",
-            queue_size=snapshot["queue_size"],
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name="document-processing-queue",
         )
-
-    def snapshot(self) -> dict:
-        snapshot = self.store.snapshot()
-        with self._lock:
-            snapshot["current_document_id"] = self._current_document_id
-        return snapshot
-
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            job = None
-            try:
-                job = self.store.claim()
-                if job is None:
-                    time.sleep(settings.queue_poll_seconds)
-                    continue
-                document_id = int(job["document_id"])
-                with self._lock:
-                    self._current_document_id = document_id
-                logger.info("Processing queued document %s (attempt %s/%s).", document_id, job["attempts"], job["max_attempts"])
-                try:
-                    result = self.worker.process_once(document_id=document_id)
-                    self.store.finish(int(job["id"]), result)
-                    logger.info("Document %s finished: %s.", document_id, result)
-                except Exception as exc:
-                    retry = self.store.fail(int(job["id"]), str(exc), int(job["attempts"]))
-                    if retry:
-                        logger.warning("Document %s failed; scheduled retry: %s", document_id, exc)
-                    else:
-                        logger.error("Document %s moved to DEAD after maximum retries: %s", document_id, exc)
-            except Exception:
-                logger.exception("Persistent queue loop failed.")
-                time.sleep(2)
-            finally:
-                with self._lock:
-                    self._current_document_id = None
+        self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
         self._thread.join(timeout=5)
-        self.store.close()
+
+    def enqueue(self, document_id: int, force: bool = False) -> QueueStatus:
+        result = self.store.enqueue(document_id, force=force)
+        status = self.store.status()
+        return QueueStatus(
+            document_id=document_id,
+            accepted=bool(result["accepted"]),
+            queued=bool(result["queued"]),
+            status=str(result["status"]),
+            queue_size=int(status["queued"]) + int(status["retry"]),
+        )
+
+    def snapshot(self) -> dict:
+        status = self.store.status()
+        with self._lock:
+            current = self._current_document_id
+        return {
+            "current_document_id": current,
+            "queue_size": int(status["queued"]) + int(status["retry"]),
+            "queued": int(status["queued"]),
+            "retry": int(status["retry"]),
+            "processing": int(status["processing"]),
+            "done": int(status["done"]),
+            "dead": int(status["dead"]),
+            "current_job": status["current"],
+        }
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            document_id = self.store.claim_next()
+            if document_id is None:
+                self._stop.wait(max(1, settings.queue_poll_interval_seconds))
+                continue
+
+            with self._lock:
+                self._current_document_id = document_id
+
+            try:
+                logger.info("Processing queued document %s.", document_id)
+                result = self.worker.process_once(document_id=document_id)
+                logger.info("Document %s finished with status %s.", document_id, result)
+
+                if result in RETRY_STATUSES:
+                    retry_scheduled = self.store.mark_retry(
+                        document_id=document_id,
+                        error=f"Worker returned {result}",
+                        max_attempts=settings.queue_max_attempts,
+                        base_delay_seconds=settings.queue_retry_base_seconds,
+                        max_delay_seconds=settings.queue_retry_max_seconds,
+                    )
+                    if retry_scheduled:
+                        logger.warning(
+                            "Document %s scheduled for retry after status %s.",
+                            document_id,
+                            result,
+                        )
+                    else:
+                        logger.error(
+                            "Document %s reached the maximum retry count.",
+                            document_id,
+                        )
+                else:
+                    self.store.mark_done(document_id)
+            except Exception as exc:
+                logger.exception("Queued processing failed for document %s.", document_id)
+                retry_scheduled = self.store.mark_retry(
+                    document_id=document_id,
+                    error=str(exc),
+                    max_attempts=settings.queue_max_attempts,
+                    base_delay_seconds=settings.queue_retry_base_seconds,
+                    max_delay_seconds=settings.queue_retry_max_seconds,
+                )
+                if not retry_scheduled:
+                    logger.error(
+                        "Document %s moved to DEAD after maximum attempts.",
+                        document_id,
+                    )
+            finally:
+                with self._lock:
+                    self._current_document_id = None

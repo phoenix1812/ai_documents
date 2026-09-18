@@ -36,7 +36,7 @@ from app.db import (
     STATUS_REVIEW_REQUIRED,
 )
 from app.paperless_client import PaperlessClient
-from app.reprocess import reprocess_paperless_document, retry_failed_document
+from app.reprocess import enqueue_paperless_document, retry_failed_document
 
 
 security = HTTPBasic()
@@ -498,13 +498,13 @@ def reprocess_submit(
     paperless_id: int = Form(...),
 ):
     try:
-        result = reprocess_paperless_document(int(paperless_id))
+        result = enqueue_paperless_document(int(paperless_id))
 
         return templates.TemplateResponse(
             "reprocess.html",
             {
                 "request": request,
-                "result": f"Paperless-ID {paperless_id} verarbeitet: {result}",
+                "result": f"Paperless-ID {paperless_id} zur Verarbeitung eingereiht: {result}",
                 "error": None,
             },
         )

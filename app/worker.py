@@ -1,12 +1,22 @@
-"""Event-driven document worker with Paperless dependency handling."""
+"""Event-driven document worker.
+
+This worker does not poll Paperless. It processes exactly one Paperless document
+when triggered with a document_id, for example from a Paperless post-consume hook.
+Queueing is handled in app.document_queue.
+"""
+
 from __future__ import annotations
+
 import logging
 import time
+
 import requests
+
 from app.classifier import DocumentClassifier
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
 
 class Worker:
     def __init__(self) -> None:
@@ -26,10 +36,18 @@ class Worker:
 
     def process_once(self, document_id: int) -> str:
         self.wait_for_paperless()
+
         if self.classifier.db.exists_paperless_id(document_id):
-            logger.info("Document %s already reached a final state. Skipping.", document_id)
+            logger.info(
+                "Document %s already reached a final state. Skipping.",
+                document_id,
+            )
             return "ALREADY_PROCESSED"
+
         logger.info("Processing document %s.", document_id)
+
         result = self.classifier.process_document(document_id=document_id)
+
         logger.info("Document %s finished with status %s.", document_id, result)
+
         return result
