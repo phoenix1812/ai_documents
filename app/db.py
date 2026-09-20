@@ -209,6 +209,8 @@ class Database:
             )
             """
         )
+        # Older databases already contain an empty key/value app_meta table.
+        self._add_column_if_missing("app_meta", "updated_at", "TEXT")
 
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_paperless_id ON documents (paperless_id)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_file_hash ON documents (file_hash)")

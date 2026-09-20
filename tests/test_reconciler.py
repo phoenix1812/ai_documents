@@ -75,6 +75,21 @@ def test_reconcile_disabled_does_not_start_thread(monkeypatch, tmp_path):
     assert started == []
 
 
+def test_legacy_app_meta_table_gets_migrated(tmp_path):
+    import sqlite3
+
+    db_file = tmp_path / "documents.db"
+    conn = sqlite3.connect(db_file)
+    conn.execute("CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    conn.commit()
+    conn.close()
+
+    db = Database(str(tmp_path))
+    db.set_meta("probe", "1")
+
+    assert db.get_meta("probe") == "1"
+
+
 def test_dry_run_rows_are_final_only_in_dry_run_mode(monkeypatch, tmp_path):
     db = Database(str(tmp_path))
     db.insert_document(
