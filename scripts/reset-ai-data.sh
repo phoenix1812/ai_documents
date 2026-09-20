@@ -19,7 +19,10 @@ docker compose up -d --build ai-worker ai-review-ui
 
 echo "Warte auf Healthcheck..."
 for i in $(seq 1 30); do
-  if curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then
+  # The worker publishes no host port; probe it from inside the container.
+  if docker compose exec -T ai-worker python -c \
+      'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8080/ready", timeout=5).read()' \
+      >/dev/null 2>&1; then
     echo "AI worker ist bereit."
     exit 0
   fi

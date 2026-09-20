@@ -13,18 +13,24 @@ The current tree implements the P0 reliability layer and the main P1 home-produc
 9. Explicit Paperless v3 secret key and NAS polling/stability configuration.
 10. Pinned Paperless/Ollama image versions.
 11. Queue safety tests for restart, health-check isolation, force-requeue and retry/dead states.
+12. Stock protection: `RECONCILE_ENABLED` and `RECONCILE_INITIAL_IMPORT` are read by
+    the reconciler, and `.dockerignore` keeps `.env` and host data out of the build image.
 
 ## Current implementation
 
 The files are already integrated in this repository. The following files contain the production changes:
 
-
-
 - `app/config.py`
 - `app/main.py`
 - `app/document_queue.py`
+- `app/queue_store.py`
+- `app/health.py`
+- `app/reconciler.py`
+- `app/db.py`
 - `docker-compose.yml`
+- `.dockerignore`
 - `scripts/post-consume-ai-worker.sh`
+- `scripts/check-env.sh`
 
 The classifier, Paperless client and review UI remain unchanged in their core responsibilities.
 
@@ -32,14 +38,16 @@ The classifier, Paperless client and review UI remain unchanged in their core re
 
 The persistent queue uses the existing `./data/documents.db` file. It creates
 a new table called `processing_jobs` and is compatible with the existing
-SQLite database layer.
+SQLite database layer. Reconciliation stores its stock baseline in a second new
+table, `app_meta`.
 
 On startup:
 
 - PROCESSING jobs are reset to QUEUED.
 - The worker resumes pending jobs.
 - After the initial delay, reconciliation scans Paperless and queues documents
-  that have not reached a final AI status.
+  that have not reached a final AI status — but only above the baseline ID that
+  `RECONCILE_INITIAL_IMPORT=false` freezes on the first cycle.
 
 Failed jobs use exponential backoff:
 
@@ -62,6 +70,8 @@ QUEUE_MAX_ATTEMPTS=10
 QUEUE_RETRY_BASE_SECONDS=30
 QUEUE_RETRY_MAX_SECONDS=1800
 
+RECONCILE_ENABLED=true
+RECONCILE_INITIAL_IMPORT=false
 RECONCILIATION_INTERVAL_SECONDS=600
 RECONCILIATION_START_DELAY_SECONDS=30
 
@@ -70,24 +80,27 @@ HEALTHCHECK_TIMEOUT_SECONDS=3
 
 ## Test after deployment
 
+The trigger server has no published host port, so run these from inside the
+Docker network:
+
 ```bash
 docker compose up -d --build
 
-curl http://127.0.0.1:8080/health
-curl http://127.0.0.1:8080/ready
-curl http://127.0.0.1:8080/live
+docker compose exec paperless curl -fsS http://ai-worker:8080/health
+docker compose exec paperless curl -fsS http://ai-worker:8080/ready
+docker compose exec paperless curl -fsS http://ai-worker:8080/live
 ```
 
 Manual reconciliation:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/reconcile
+docker compose exec paperless curl -fsS -X POST http://ai-worker:8080/reconcile
 ```
 
 The trigger remains:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/process \
+docker compose exec paperless curl -fsS -X POST http://ai-worker:8080/process \
   -H 'Content-Type: application/json' \
   -d '{"document_id": 123}'
 ```
@@ -98,7 +111,7 @@ curl -X POST http://127.0.0.1:8080/process \
 2. While it is processing, run:
    `docker compose restart ai-worker`
 3. Start the container again.
-4. Check `/health`.
+4. Check `/health` (see the `docker compose exec` form above).
 5. The job should return to QUEUED and be processed.
 
 ## Backup
@@ -117,10 +130,20 @@ Run:
 
 Recommended: execute it once per day with the Synology Task Scheduler or host
 cron. Store the `backups/` directory on a different physical storage target
-if possible.
+if possible. The archive includes `env.backup`, so it contains every secret in
+`.env` and must be stored accordingly.
 
-## One deliberate design choice
+## Deliberate design choices
 
 Paperless remains the source of truth. Reconciliation does not overwrite
 Paperless metadata; it only finds documents that have no final AI processing
 state and puts them into the persistent queue.
+
+"Final" depends on the active mode. In live mode (`DRY_RUN=false`) a `DRY_RUN`
+row is not final, so documents that were only classified during the test phase
+are picked up again and written for real.
+
+With `RECONCILE_INITIAL_IMPORT=false`, the highest Paperless ID present at the
+first reconciliation cycle is stored in `app_meta` and permanently excluded from
+automatic processing. An existing archive is therefore never retitled by a
+background thread; `scripts/reconcile_missing.sh` stays the explicit opt-in.

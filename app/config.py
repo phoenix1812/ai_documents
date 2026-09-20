@@ -2,6 +2,15 @@
 
 import os
 
+TRUE_VALUES = {"1", "true", "yes", "on"}
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in TRUE_VALUES
+
 
 class Settings:
     def __init__(self) -> None:
@@ -54,6 +63,8 @@ class Settings:
         )
 
         # Paperless <-> AI database reconciliation.
+        self.reconcile_enabled = _env_bool("RECONCILE_ENABLED", True)
+        self.reconcile_initial_import = _env_bool("RECONCILE_INITIAL_IMPORT", False)
         self.reconciliation_interval_seconds = int(
             os.getenv("RECONCILIATION_INTERVAL_SECONDS", "600")
         )

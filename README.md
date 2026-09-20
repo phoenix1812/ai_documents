@@ -14,6 +14,11 @@ Paperless bleibt die Single Source of Truth. PDFs werden nicht separat exportier
 
 - Eventbasierte Verarbeitung per Paperless `POST_CONSUME_SCRIPT`
 - Single-Worker-Queue fuer serielle Ollama-Verarbeitung
+- Persistente Queue in SQLite inkl. Crash-Recovery, Exponential Backoff und DEAD-Status
+- Periodischer Abgleich zwischen Paperless-Bestand und AI-Datenbank (`app/reconciler.py`)
+- Schutz des Bestands: `RECONCILE_INITIAL_IMPORT=false` importiert vorhandene
+  Dokumente nicht automatisch, sondern erst ab der beim ersten Lauf gemerkten
+  Paperless-ID
 - Lokale Klassifikation ueber Ollama
 - Automatisches Setzen fachlicher Paperless-Metadaten:
   - Titel
@@ -40,11 +45,11 @@ scripts/post-consume-ai-worker.sh
   |
   | POST /process {"document_id": ...}
   v
-app/main.py
+app/main.py (HTTP-Trigger, Port 8080 im Docker-Netz)
   |
   | enqueue(document_id)
   v
-app/document_queue.py
+app/document_queue.py  <->  app/queue_store.py (SQLite-Tabelle processing_jobs)
   |
   | genau ein Dokument gleichzeitig
   v
@@ -60,22 +65,37 @@ app/classifier.py
   +--> validator.py: Ergebnis pruefen
   +--> Paperless API: Metadaten aktualisieren
   +--> SQLite: Status und Review-Daten speichern
+
+
+app/reconciler.py (Background-Thread, alle RECONCILIATION_INTERVAL_SECONDS)
+  |
+  | vergleicht Paperless-Bestand mit der AI-Datenbank
+  v
+app/document_queue.py
 ```
 
 Die Review-UI laeuft als eigener Prozess. Reprocess und Retry klassifizieren
 nicht inline, sondern senden ebenfalls `POST /process` an den AI-Worker. Dadurch
 bleiben Ollama-Aufrufe zentral serialisiert.
 
+`GET /health`, `GET /live` und `GET /ready` liefert `app/health.py`. `/ready` ist
+der einzige Endpoint, der den Stack als ganzes bewertet (Paperless, Ollama-
+Modell, SQLite-Integritaet, Queue-Integritaet) und damit der Docker-Healthcheck
+ist. Healthchecks veraendern bewusst keinen Queue-Zustand.
+
 ## Services
 
 | Service | Zweck | Port |
 | --- | --- | --- |
 | `paperless` | Paperless Web UI und API | `127.0.0.1:8000` |
-| `ai-worker` | Trigger-Server und Queue-Verarbeitung | intern `8080` |
+| `ai-worker` | Trigger-Server, Queue-Verarbeitung, Health/Ready | `8080` nur im Docker-Netz, nicht publiziert |
 | `ai-review-ui` | Review-UI fuer Status, Korrektur und Reprocess | `127.0.0.1:8090` |
-| `ollama` | Lokales LLM | intern `11434` |
+| `ollama` | Lokales LLM | `11434` nur im Docker-Netz |
 | `db` | PostgreSQL fuer Paperless | intern |
 | `redis` | Redis fuer Paperless | intern |
+
+`ai-worker` und `ai-review-ui` werden aus demselben Image gebaut (`dockerfile`);
+`.dockerignore` haelt Secrets, `.env` und Datenverzeichnisse daraus fern.
 
 ## Einrichtung
 
@@ -103,7 +123,13 @@ QUEUE_MAX_ATTEMPTS=10
 QUEUE_RETRY_BASE_SECONDS=30
 QUEUE_RETRY_MAX_SECONDS=1800
 RECONCILIATION_INTERVAL_SECONDS=600
+RECONCILE_ENABLED=true
+RECONCILE_INITIAL_IMPORT=false
 ```
+
+`DRY_RUN` muss gesetzt und entweder `true` oder `false` sein; `scripts/check-env.sh`
+prueft das. `EXPORT_PATH` und `POLL_INTERVAL` in einer alten `.env` werden vom
+aktuellen Code nicht mehr gelesen.
 
 3. Umgebung pruefen:
 
@@ -157,12 +183,26 @@ und starte die Container neu:
 docker compose up -d --build
 ```
 
+Im Live-Modus (`DRY_RUN=false`) gilt der Status `DRY_RUN` nicht mehr als
+abgeschlossen: Der Reconciler und `POST /process` holen diese Dokumente erneut
+ab und schreiben die Metadaten jetzt nach Paperless. Ein umstaendliches
+Nachziehen ist nicht noetig.
+
 ## Verarbeitung testen
 
-AI-Worker-Healthcheck:
+Der AI-Worker publiziert keinen Port auf dem Host. Endpunkte also von innen
+ansprechen:
 
 ```bash
 docker compose exec paperless curl -fsS http://ai-worker:8080/health
+docker compose exec paperless curl -fsS http://ai-worker:8080/ready
+docker compose exec paperless curl -fsS http://ai-worker:8080/live
+```
+
+Manueller Reconciliation-Lauf (achtet dabei den Baseline-Schutz des Bestands):
+
+```bash
+docker compose exec paperless curl -fsS -X POST http://ai-worker:8080/reconcile
 ```
 
 Ein einzelnes Dokument manuell einreihen:
@@ -186,15 +226,24 @@ Beispielantwort:
 }
 ```
 
-Der Queue-Status erscheint im Healthcheck:
+`/health` liefert die Abhaengigkeiten und den Queue-Zustand:
 
 ```json
 {
   "status": "ok",
+  "paperless": {"status": "ok", "http_status": 200},
+  "ollama": {"status": "ok", "model": "gemma3:4b", "model_available": true},
+  "database": {"status": "ok", "integrity": "ok", "path": "/data"},
+  "queue_database": {"status": "ok", "integrity": "ok"},
   "queue": {
     "current_document_id": 123,
     "queue_size": 2,
-    "queued_or_running": [123, 124, 125]
+    "queued": 1,
+    "retry": 1,
+    "processing": 1,
+    "done": 40,
+    "dead": 0,
+    "current_job": {"document_id": 123, "attempts": 1, "updated_at": "2026-09-20T09:12:03+00:00"}
   }
 }
 ```
@@ -219,9 +268,9 @@ werden. Review-Entscheidungen bleiben zusaetzlich in SQLite nachvollziehbar.
 | Status | Bedeutung |
 | --- | --- |
 | `AUTO_APPROVED` | Validierung bestanden und Metadaten nach Paperless geschrieben |
-| `DRY_RUN` | Klassifiziert, aber wegen `DRY_RUN=true` nicht nach Paperless geschrieben |
+| `DRY_RUN` | Klassifiziert, aber wegen `DRY_RUN=true` nicht nach Paperless geschrieben. Gilt nur im Testmodus als abgeschlossen; im Live-Modus wird das Dokument erneut verarbeitet |
 | `NEEDS_REVIEW` | Klassifikation ist plausibel, aber nicht sicher genug fuer Auto-Apply |
-| `REVIEW_REQUIRED` | Manuell abgelehnt oder weiter klaerungsbeduerftig |
+| `REVIEW_REQUIRED` | In der Review-UI als klaerungsbeduerftig markiert |
 | `MANUALLY_APPROVED` | In der Review-UI manuell gespeichert/freigegeben |
 | `SKIPPED_DUPLICATE` | PDF- oder OCR-Duplikat erkannt |
 | `FAILED_OCR` | Kein OCR-Inhalt vorhanden |
@@ -229,6 +278,19 @@ werden. Review-Entscheidungen bleiben zusaetzlich in SQLite nachvollziehbar.
 | `FAILED_API` | Paperless/Ollama/API-Aufruf fehlgeschlagen |
 | `FAILED` | Unerwarteter Fehler |
 | `IGNORED` | Fehler wurde manuell ignoriert |
+
+`DONE` und `FAILED_EXPORT` sind als Statuswerte noch definiert und werden in der
+Review-UI mitgefuehrt, vom aktuellen Klassifikationspfad aber nicht geschrieben.
+
+Die Statusse `FAILED*` und `FAILED` gelten als wiederholbar: Die Queue versucht es
+mit Backoff erneut, bis `QUEUE_MAX_ATTEMPTS` erreicht ist (`DEAD`). Alle uebrigen
+Statusse gelten im jeweils aktiven Modus als endgueltig.
+
+## Queue-Zustaende
+
+`processing_jobs` in SQLite kennt `QUEUED`, `PROCESSING`, `RETRY`, `DONE` und
+`DEAD`. `DONE` bedeutet hier "ein Versuch ist durchgelaufen" – der fachliche
+Status steht in der `documents`-Tabelle.
 
 ## Duplikaterkennung
 
@@ -284,18 +346,49 @@ Wichtige Variablen:
 | `PAPERLESS_URL` | Interne Paperless-URL fuer API-Aufrufe |
 | `PAPERLESS_PUBLIC_URL` | Oeffentliche URL fuer Paperless und Links aus der Review-UI |
 | `PAPERLESS_TOKEN` | Paperless API-Token |
+| `PAPERLESS_HEALTHCHECK_URL` | Abweichende URL fuer den Paperless-Healthcheck, Standard `PAPERLESS_URL` |
 | `OLLAMA_URL` | Interne Ollama-URL |
-| `OLLAMA_MODEL` | Modellname fuer Klassifikation |
+| `OLLAMA_MODEL` | Modellname fuer Klassifikation und Readiness-Check |
 | `DB_PATH` | Verzeichnis fuer `documents.db` |
 | `AI_WORKER_TRIGGER_URL` | Queue-Trigger des AI-Workers |
+| `TRIGGER_PORT` | Port des Trigger-Servers, im Compose-Setup `8080` |
 | `CONFIDENCE_THRESHOLD` | Mindestvertrauen fuer Auto-Approval |
 | `MIN_TITLE_LENGTH` | Mindestlaenge fuer gueltige Titel |
-| `DRY_RUN` | Klassifizieren ohne Paperless-Update |
+| `DRY_RUN` | `true` = klassifizieren ohne Paperless-Update. Muss gesetzt sein |
 | `REVIEW_UI_USERNAME` | Basic-Auth-Benutzer der Review-UI |
 | `REVIEW_UI_PASSWORD` | Basic-Auth-Passwort der Review-UI |
+| `REVIEW_UI_PORT` | Port der Review-UI, im Compose-Setup `8090` |
+| `QUEUE_POLL_INTERVAL_SECONDS` | Interval fuer den Queue-Claim, Standard `2` |
+| `QUEUE_MAX_ATTEMPTS` | Versuche, bevor ein Job `DEAD` wird, Standard `10` |
+| `QUEUE_RETRY_BASE_SECONDS` | Basis fuer den exponentiellen Backoff, Standard `30` |
+| `QUEUE_RETRY_MAX_SECONDS` | Obergrenze des Backoffs, Standard `1800` |
+| `RECONCILE_ENABLED` | `false` deaktiviert den periodischen Reconciliation-Thread; `POST /reconcile` bleibt moeglich |
+| `RECONCILE_INITIAL_IMPORT` | `false` (Standard) importiert den vorhandenen Paperless-Bestand nicht automatisch |
+| `RECONCILIATION_INTERVAL_SECONDS` | Abstand der Abgleichlaeufe, Standard `600` |
+| `RECONCILIATION_START_DELAY_SECONDS` | Startverzoegerung nach dem Hochfahren, Standard `30` |
+| `HEALTHCHECK_TIMEOUT_SECONDS` | Timeout der Health-/Ready-Pruefungen, Standard `3` |
 
 `SQLITE_PATH` wird fuer alte Setups weiterhin akzeptiert. Intern verwendet die
 App aber `DB_PATH` als Verzeichnis und legt darin `documents.db` an.
+
+### Bestand nachtraeglich verarbeiten
+
+Standardmaessig bleibt dein Paperless-Bestand unangetastet: Beim ersten
+Reconciliation-Lauf merkt sich der Worker in der Tabelle `app_meta` die hoechste
+bis dahin vorhandene Paperless-ID (`reconcile_baseline_document_id`) und
+ueberspringt alles darunter. Neue Dokumente werden ganz normal per
+Post-Consume-Trigger verarbeitet.
+
+Den Bestand holst du gezielt nach, indem du entweder
+
+```bash
+scripts/reconcile_missing.sh
+```
+
+ausfuehrst (verarbeitet die neuesten fehlenden Dokumente, Page-Size 100), oder
+indem du `RECONCILE_INITIAL_IMPORT=true` setzt und neu startest. Fuer eine
+weitere Testphase danach zurueck auf `false`; die gesetzte Baseline bleibt
+bestehen, bis du `scripts/reset-ai-data.sh` nutzt.
 
 ## Entwicklung
 
@@ -320,47 +413,68 @@ python -m pytest -q
 python -m compileall -q app tests
 ```
 
+Ein Neu-Bauen der Pins auf einem neueren Python als 3.12 schlaegt fehl
+(`pydantic-core` hat dafuer keine Wheels); die Pins sind bewusst auf das
+Dockerfile-Bild gesetzt.
+
 ## Verzeichnisstruktur
 
 ```text
 .
 ├── app/
-│   ├── main.py
-│   ├── document_queue.py
-│   ├── worker.py
-│   ├── classifier.py
-│   ├── paperless_client.py
-│   ├── ollama_client.py
-│   ├── validator.py
-│   ├── db.py
-│   ├── hash_store.py
-│   ├── models.py
-│   ├── prompts.py
-│   ├── reprocess.py
-│   ├── reconcile_missing.py
-│   ├── review_ui.py
-│   └── logging_config.py
+│   ├── main.py               # HTTP-Trigger (/process, /health, /live, /ready, /reconcile)
+│   ├── config.py             # zentrale Umgebungskonfiguration
+│   ├── document_queue.py     # Single-Worker-Loop ueber der persistenten Queue
+│   ├── queue_store.py        # SQLite-Tabelle processing_jobs (Claim, Retry, DEAD)
+│   ├── worker.py             # verarbeitet genau ein Dokument pro Aufruf
+│   ├── classifier.py         # OCR laden, klassifizieren, Titel bauen, zurueckschreiben
+│   ├── models.py             # Datenmodell der Klassifikation
+│   ├── prompts.py            # Ollama-Prompts
+│   ├── ollama_client.py      # Ollama-Aufrufe
+│   ├── paperless_client.py   # Paperless-API-Client
+│   ├── validator.py          # Prueft Ergebnisse vor Auto-Apply
+│   ├── db.py                 # documents-, review_decisions- und app_meta-Tabelle
+│   ├── hash_store.py         # PDF-/OCR-Hashbildung fuer die Duplikaterkennung
+│   ├── health.py             # Health- und Readiness-Checks
+│   ├── reconciler.py         # periodischer Paperless-Abgleich inkl. Bestandsschutz
+│   ├── reconcile_missing.py  # einmaliger, manueller Nachlauf (scripts/reconcile_missing.sh)
+│   ├── reprocess.py          # Reprocess/Retry ueber denselben Queue-Trigger
+│   ├── review_ui.py          # FastAPI-Review-UI mit Basic-Auth
+│   ├── logging_config.py     # Logging-Setup
+│   ├── exporter.py           # aktueller Stand: von nichts importiert (Altlast)
+│   ├── static/
+│   └── templates/
 ├── scripts/
 │   ├── post-consume-ai-worker.sh
 │   ├── check-env.sh
 │   ├── healthcheck.sh
+│   ├── ensure-ollama-model.sh
 │   ├── backup.sh
-│   └── restore.sh
+│   ├── restore.sh
+│   ├── reconcile_missing.sh
+│   └── reset-ai-data.sh
 ├── tests/
 ├── docker-compose.yml
 ├── dockerfile
+├── .dockerignore
 ├── requirements.txt
 ├── requirements-dev.txt
-└── .env.example
+├── .env.example
+├── GO_LIVE.md
+└── P0_README.md
 ```
 
 ## Sicherheit und Betrieb
 
-- `PAPERLESS_TOKEN` und `.env` niemals committen
-- Standardpasswoerter vor dem Betrieb aendern
-- Review-UI nicht oeffentlich ins Internet stellen
-- AI-Worker nur intern im Docker-Netz verwenden
-- SQLite-Datenbank und Paperless-Daten regelmaessig sichern
+- `PAPERLESS_TOKEN` und `.env` niemals committen (`.gitignore` deckt `.env` ab)
+- `.dockerignore` haelt `.env`, Datenverzeichnisse und `.git` aus dem Image – beim
+  Anlegen neuer Build-Kontexte mit `COPY . .` nicht entfernen
+- Standardpasswoerter vor dem Betrieb aendern; `scripts/check-env.sh` prueft
+  Platzhalterwerte
+- Review-UI nicht oeffentlich ins Internet stellen, sie hoert auf `127.0.0.1:8090`
+- AI-Worker nur intern im Docker-Netz verwenden, er hat keinen publizierten Port
+- SQLite-Datenbank und Paperless-Daten regelmaessig sichern (`scripts/backup.sh`);
+  das Backup enthaelt die `.env` und damit Secrets – Aufbewahrung geschtzt
 - Neue Setups zuerst mit `DRY_RUN=true` testen
 - LLM-Ergebnisse stichprobenartig ueber die Review-UI pruefen
 
@@ -369,10 +483,16 @@ python -m compileall -q app tests
 - Die Verarbeitungsqueue ist persistent in SQLite und ueberlebt Container-Neustarts.
 - `PROCESSING`-Jobs werden nur beim Start des AI-Workers recovered; ein Healthcheck
   veraendert niemals den Queue-Zustand.
-- Reconciliation laeuft periodisch und arbeitet gegen die Paperless-API.
+- Reconciliation laeuft periodisch und arbeitet gegen die Paperless-API. Der
+  vorhandene Bestand wird dabei nicht automatisch umgetitelt (siehe
+  `RECONCILE_INITIAL_IMPORT`).
+- Der Abgleich laedt den kompletten Paperless-Dokumentenbestand und prueft jede
+  ID gegen SQLite. Ab einigen tausend Dokumenten ist das alle zehn Minuten spuerbar.
 - Das konfigurierte Ollama-Modell ist Bestandteil des Readiness-Checks.
 - Fuer NAS/SMB/NFS-Consume-Pfade wird Paperless v3 mit Polling betrieben.
 - Vor dem ersten echten Betrieb mit `DRY_RUN=true` testen und anschliessend ein
   Backup/Restore einmal erfolgreich durchspielen.
 - Gespeicherte Review-Entscheidungen werden noch nicht automatisch in Prompts
   oder Regeln zurueckgespielt.
+- `app/exporter.py` und die Umgebungsvariablen `EXPORT_PATH` und `POLL_INTERVAL`
+  sind Altlasten ohne Bezug zum aktuellen Codepfad.
