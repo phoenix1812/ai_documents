@@ -77,7 +77,14 @@ class DocumentProcessingQueue:
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            document_id = self.store.claim_next()
+            try:
+                document_id = self.store.claim_next()
+            except Exception:
+                # A transient SQLite/IO error must not kill the only consumer:
+                # the thread would stop working while /ready still reports ok.
+                logger.exception("Queue claim failed.")
+                document_id = None
+
             if document_id is None:
                 self._stop.wait(max(1, settings.queue_poll_interval_seconds))
                 continue
