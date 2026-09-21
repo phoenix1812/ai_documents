@@ -694,6 +694,41 @@ class Database:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def correction_patterns(self) -> dict[str, list[dict[str, Any]]]:
+        """Group recorded corrections into "KI-Wert -> korrigierter Wert"-Muster.
+
+        The raw decision history cannot show which mistake repeats, and a
+        repeating mistake is what a deterministic rule is built from. The column
+        names are constants here, never caller input.
+        """
+
+        def grouped(original: str, final: str) -> list[dict[str, Any]]:
+            rows = self.conn.execute(
+                f"""
+                SELECT COALESCE(NULLIF(TRIM({original}), ''), '(leer)') AS from_value,
+                       TRIM({final}) AS to_value,
+                       COUNT(*) AS occurrences,
+                       MAX(paperless_id) AS last_paperless_id
+                FROM review_decisions
+                WHERE TRIM(COALESCE({final}, '')) != ''
+                  AND TRIM(COALESCE({original}, '')) != TRIM({final})
+                GROUP BY from_value, to_value
+                ORDER BY occurrences DESC, to_value
+                """,
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+        return {
+            "document_types": grouped(
+                "original_ai_document_type",
+                "final_document_type",
+            ),
+            "correspondents": grouped(
+                "original_ai_correspondent",
+                "final_correspondent",
+            ),
+        }
+
     def integrity_check(self) -> str:
         row = self.conn.execute("PRAGMA integrity_check").fetchone()
         if row is None:

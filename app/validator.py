@@ -165,6 +165,30 @@ def _correspondent_in_document_head(correspondent: str | None, document_head: st
     )
 
 
+TAX_AUTHORITY_RE = re.compile(r"finanzamt", re.IGNORECASE)
+
+
+def apply_tax_authority_type_rule(result: ClassificationResult) -> bool:
+    """Force ``Steuer`` when the sender is a tax office. True when applied.
+
+    Derived from the operator's own corrections: three documents (paperless
+    37, 38, 42) carried the Finanzamt as correspondent but came back typed as
+    Rechnung or Versicherung, and all three were fixed by hand. A tax office
+    issues assessments, not invoices, so the type is taken from the sender
+    instead of from the model. Deliberately limited to Finanzamt: a Stadt or
+    Kreis also issues fee invoices, so those stay prompt guidance only.
+    """
+
+    if result.document_type == "Steuer":
+        return False
+
+    if not TAX_AUTHORITY_RE.search(result.correspondent or ""):
+        return False
+
+    result.document_type = "Steuer"
+    return True
+
+
 def validate_classification(
     result: ClassificationResult,
     document_head: str | None = None,

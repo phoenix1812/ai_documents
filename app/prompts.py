@@ -51,10 +51,19 @@ Erlaubte document_type Werte:
 - Sonstiges
 
 Feldregeln:
+- document_type folgt der Funktion des Dokuments, nicht dem Absender: ein
+  Zahlungsaufruf mit Betrag und Faelligkeitsdatum ist eine Rechnung, auch wenn
+  der Absender eine Versicherung ist. Was den Versicherungsvertrag selbst
+  betrifft (Police, Nachtrag, Renteninformation, Leistungsmitteilung) ist
+  Versicherung.
+- Ein Bescheid einer Behoerde ueber Steuern oder Abgaben - Finanzamt, Stadt,
+  Kreis - ist Steuer, auch wenn der Brief wie eine Rechnung aussieht.
 - correspondent: der Absender, also die Firma oder Behörde, die das Dokument
   geschrieben hat. Sie steht fast immer im Briefkopf in den ersten Zeilen.
   Nenne NICHT den Empfänger (z. B. den Kunden) und NICHT eine im Text erwähnte
   Dritte, z. B. eine Aufsichtsbehörde.
+- correspondent muss wortwoertlich im Dokument stehen. Wenn du keinen Absender
+  findest, lasse das Feld leer; errate keinen Firmennamen.
 - subject: kurzer fachlicher Inhalt in höchstens 5 Wörtern, z. B. Stromrechnung,
   Steuerbescheid, Glasfaservertrag.
 - document_date: wichtigstes Dokumentdatum im Format YYYY-MM-DD oder null.

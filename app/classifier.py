@@ -27,6 +27,7 @@ from app.hash_store import sha256
 from app.models import ClassificationResult
 from app.ollama_client import OllamaClient
 from app.paperless_client import PaperlessClient
+from app.validator import apply_tax_authority_type_rule
 from app.validator import validate_classification
 
 logger = logging.getLogger(__name__)
@@ -404,11 +405,22 @@ class DocumentClassifier:
                 return STATUS_FAILED_LLM
 
             result.tags = clean_paperless_tags(result.tags)
+
+            # Before the title is built: document_type is a title component.
+            applied_rule = apply_tax_authority_type_rule(result)
             result.title = build_document_title(result)
 
             confidence = get_result_confidence(result)
             reason = get_result_reason(result)
             validation = validate_classification(result, document_head=ocr_excerpt)
+
+            if applied_rule:
+                logger.info(
+                    "Type rule applied for document %s: correspondent is a tax "
+                    "office, document_type forced to Steuer.",
+                    document_id,
+                )
+                reason = f"{reason} | Regel: Finanzamt => Steuer".strip(" |")
 
             if not validation.valid:
                 return self._store_review(

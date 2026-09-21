@@ -390,6 +390,43 @@ wird ohne Klick auf diese Schaltflaeche nie veroendert. Zeilen, die vor diesen
 beiden Spalten angelegt wurden, haben kein Thema und kein Datum gespeichert;
 ihr neu gebauter Titel enthaelt deshalb nur Dokumenttyp und Korrespondent.
 
+## Aus Korrekturen gelernte Regeln
+
+Jede Freigabe, Korrektur und Ablehnung landet in der Tabelle `review_decisions`
+(`app/db.py:214`). Frueher war das ein reines Protokoll - der Klassifikator hat es
+nie gelesen. Drei Muster daraus sind jetzt als deterministische Regeln eingebaut,
+weil ein 4B-Modell sie auch nach dem Prompt-Fix nicht zuverlaessig selbst trifft:
+
+- **Finanzamt => Steuer** (`apply_tax_authority_type_rule`, `app/validator.py`).
+  Abgesichert an drei korrigierten Dokumenten (Paperless 37, 38, 42), bei denen
+  der Absender stimmte, der Typ aber `Rechnung` bzw. `Versicherung` war. Die Regel
+  laeuft im Classifier vor dem Titelbau, weil der Dokumenttyp Titelbestandteil
+  ist; die Anwendung steht zusaetzlich im Feld `reason` der Zeile. Absichtlich nur
+  aufs Finanzamt: Stadt und Kreis verschicken auch Gebuehrenrechnungen, deren
+  Fall liegt deshalb nur als Prompt-Hinweis (`app/prompts.py`) vor.
+- **Kanonischer Korrespondent** (`resolve_existing_name`, `app/paperless_client.py`).
+  Jede neue Schreibweise eines Absenders hatte einen eigenen Paperless-Korrespondenten
+  erzeugt; der Bestand trug deshalb `Finanzamt` neben `Finanzamt Erkelenz` und
+  `MANN GEBÄUDETECHNIK` neben `Mann Gebäudetechnik GmbH`. Vor dem Anlegen wird gegen
+  die vorhandenen Namen gematcht (case-insensitive, Vagheit-in-Spezifik-Enthaltung,
+  bei Mehrdeutigkeit derjenige mit den meisten Dokumenten). Aufloesung statt Raten:
+  zwei gleich starke Kandidaten fuehren zu keinem Match, dann entsteht wie bisher
+  ein neuer Name.
+- **Funktion statt Absender** im System-Prompt: Zahlungsaufruf mit Betrag und
+  Faelligkeitsdatum ist `Rechnung` (auch von einer Versicherung), was den Vertrag
+  selbst betrifft ist `Versicherung`, Behoerdenbescheid ueber Abgaben ist
+  `Steuer`,
+  und einen Absender ohne Beleg im Text soll das Modell leer lassen statt ihn zu
+  erfinden.
+
+Die Review-UI macht den Rest sichtbar: `/learning` gruppiert die Historie nach
+`KI-Typ -> korrigierter Typ` und `KI-Absender -> korrigierter Absender` statt nur
+eine Rohliste zu zeigen, und ein Save, das Absender, Typ oder Tags aendert,
+verlangt einen Grund (`app/review_ui.py`, Pruefung vor `update_document_values`).
+Ohne Grund gibt es HTTP 400 statt eines weiteren „Manuelle Korrektur"-Eintrags,
+aus dem sich nichts ableiten laesst. Reine Titelkorrekturen bleiben vom
+Pflichtgrund ausgenommen.
+
 ## Konfiguration
 
 Wichtige Variablen:

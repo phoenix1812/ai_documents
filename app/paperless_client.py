@@ -10,6 +10,9 @@ Responsible for:
 - marking a detected duplicate with a tag and a note about its original
 """
 
+from __future__ import annotations
+
+import re
 from typing import Any
 
 import requests
@@ -17,6 +20,69 @@ import requests
 from app.config import settings
 
 DUPLICATE_TAG_NAME = "Duplikat"
+
+# Below this length a name is too generic to be matched by containment: "AXA"
+# would happily swallow "AXA Krankenversicherung AG" and "Kasse" everything.
+MIN_CONTAINMENT_MATCH_CHARS = 6
+
+
+def normalize_name(value: str | None) -> str:
+    """Case- and punctuation-insensitive form used to compare Paperless names."""
+
+    return re.sub(r"[^0-9a-zäöüß]+", " ", (value or "").casefold()).strip()
+
+
+def resolve_existing_name(
+    wanted: str,
+    existing: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Pick the established spelling for a sender the model named imprecisely.
+
+    A 4B model writes the same issuer in several spellings, and every new
+    spelling became a new correspondent in Paperless: the archive now holds
+    both "Finanzamt" and "Finanzamt Erkelenz", both "MANN GEBÄUDETECHNIK" and
+    "Mann Gebäudetechnik GmbH". The operator's recorded corrections are exactly
+    this cleanup, so before creating a name the existing ones are searched for
+    an equal or containing spelling and the one with the most documents wins.
+    Ambiguous candidates are refused instead of guessed.
+    """
+
+    target = normalize_name(wanted)
+    if not target:
+        return None
+
+    def matches(item: dict[str, Any]) -> bool:
+        other = normalize_name(item.get("name"))
+        if not other:
+            return False
+        if other == target:
+            return True
+        # Only the vague-to-specific direction: the model naming "Finanzamt"
+        # stands for the existing "Finanzamt Erkelenz". The reverse - a name
+        # more specific than anything on record - is treated as a genuinely new
+        # correspondent, because merging it into the shorter existing one would
+        # put documents under the wrong sender.
+        if len(target) < MIN_CONTAINMENT_MATCH_CHARS:
+            return False
+        return re.search(rf"(^| ){re.escape(target)}( |$)", other) is not None
+
+    candidates = [item for item in existing if matches(item)]
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda item: int(item.get("document_count") or 0),
+        reverse=True,
+    )
+
+    if len(candidates) > 1:
+        best = int(candidates[0].get("document_count") or 0)
+        runner_up = int(candidates[1].get("document_count") or 0)
+        if best == runner_up:
+            return None
+
+    return candidates[0]
+
 
 DUPLICATE_REASON_LABELS = {
     "file_hash": "identische PDF-Datei",
@@ -135,7 +201,17 @@ class PaperlessClient:
         return self._get_or_create_named_id("/api/document_types/", name)
 
     def get_or_create_correspondent_id(self, name: str) -> int | None:
-        return self._get_or_create_named_id("/api/correspondents/", name)
+        """Return the correspondent ID for a name the model may have invented."""
+
+        clean_name = name.strip()
+        if not clean_name:
+            return None
+
+        match = resolve_existing_name(clean_name, self._get_paginated("/api/correspondents/"))
+        if match is not None:
+            return int(match["id"])
+
+        return self._get_or_create_named_id("/api/correspondents/", clean_name)
 
     def get_documents(self) -> list[dict[str, Any]]:
         """Load all available documents."""

@@ -85,6 +85,8 @@ templates = Jinja2Templates(directory="app/templates")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 
+DEFAULT_CORRECTION_REASON = "Manuelle Korrektur"
+
 ALL_STATUS_FILTERS = (
     STATUS_AUTO_APPROVED,
     STATUS_MANUALLY_APPROVED,
@@ -330,7 +332,7 @@ def save_document(
     document_type: str = Form(""),
     tags: str = Form(""),
     apply_to_paperless: bool = Form(default=False),
-    correction_reason: str = Form(default="Manuelle Korrektur"),
+    correction_reason: str = Form(default=DEFAULT_CORRECTION_REASON),
     rebuild_title: bool = Form(default=False),
 ):
     db = get_db()
@@ -360,6 +362,25 @@ def save_document(
 
     if not clean_title:
         raise HTTPException(status_code=400, detail="Title must not be empty")
+
+    # 29 of the first 31 recorded corrections said nothing but the pre-filled
+    # placeholder, so the history could not show which mistake repeats. A
+    # correction of the content fields now has to say why. The title is left out
+    # because rebuilding it from the stored fields is a formatting action.
+    changed_content = (
+        clean_correspondent != (item.get("correspondent") or "").strip()
+        or clean_document_type != (item.get("document_type") or "").strip()
+        or tag_list != (item.get("tags_list") or [])
+    )
+
+    if changed_content and correction_reason.strip() in ("", DEFAULT_CORRECTION_REASON):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Bitte einen Grund angeben, was an der Klassifikation falsch war - "
+                "daraus entstehen die Regeln fuer kueftige Dokumente."
+            ),
+        )
 
     db.update_document_values(
         document_db_id=item_id,
@@ -544,13 +565,13 @@ def reprocess_submit(
 @app.get("/learning")
 def learning(request: Request):
     db = get_db()
-    decisions = db.learning_summary(limit=50)
 
     return templates.TemplateResponse(
         "learning.html",
         {
             "request": request,
-            "decisions": decisions,
+            "decisions": db.learning_summary(limit=50),
+            "patterns": db.correction_patterns(),
         },
     )
 

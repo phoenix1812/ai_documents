@@ -10,6 +10,63 @@
 </header>
 
 <section class="panel">
+    <h2>Wiederkehrende Muster</h2>
+    <p>Dieselbe Korrektur mehrfach bedeutet eine Regel, die der Worker noch nicht kennt.</p>
+
+    <h3>Dokumenttyp</h3>
+    {% if not patterns.document_types %}
+        <p>Keine wiederkehrenden Typkorrekturen.</p>
+    {% else %}
+        <table>
+            <thead>
+                <tr>
+                    <th>KI setzte</th>
+                    <th>Du korrigiert auf</th>
+                    <th>Anzahl</th>
+                    <th>Letzte Paperless-ID</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in patterns.document_types %}
+                    <tr>
+                        <td>{{ row.from_value or "—" }}</td>
+                        <td>{{ row.to_value }}</td>
+                        <td>{{ row.occurrences }}</td>
+                        <td>{{ row.last_paperless_id }}</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% endif %}
+
+    <h3>Absender</h3>
+    {% if not patterns.correspondents %}
+        <p>Keine wiederkehrenden Absenderkorrekturen.</p>
+    {% else %}
+        <table>
+            <thead>
+                <tr>
+                    <th>KI setzte</th>
+                    <th>Du korrigiert auf</th>
+                    <th>Anzahl</th>
+                    <th>Letzte Paperless-ID</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in patterns.correspondents %}
+                    <tr>
+                        <td>{{ row.from_value or "—" }}</td>
+                        <td>{{ row.to_value }}</td>
+                        <td>{{ row.occurrences }}</td>
+                        <td>{{ row.last_paperless_id }}</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% endif %}
+</section>
+
+<section class="panel">
     {% if not decisions %}
         <p>Noch keine Review-Entscheidungen vorhanden.</p>
     {% else %}
