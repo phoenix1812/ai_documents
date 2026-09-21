@@ -66,7 +66,10 @@ Feldregeln:
 - contract_number: Vertragsnummer/Policennummer/Aktenzeichen oder null.
 - tags: nur fachliche Tags, keine technischen Workflow-Tags.
 - confidence: Zahl zwischen 0 und 1.
-- reason: kurze Begründung der Klassifikation.
+- reason: dieses Feld wird zuerst generiert und ist die Grundlage der ganzen
+  Antwort. Beschreibe in einem Halbsatz (maximal 25 Woerter), was das Dokument
+  ist und wer es ausgestellt hat. document_type und correspondent muessen zu
+  diesem Satz passen.
 
 Verbotene technische Tags:
 - review
@@ -100,6 +103,7 @@ OCR-Auszug:
 Gib exakt dieses JSON-Schema zurück:
 
 {{
+  "reason": "Rechnung von Amazon mit Rechnungsdatum, Rechnungsnummer und Gesamtbetrag erkannt",
   "document_type": "Rechnung",
   "correspondent": "Amazon",
   "subject": "Büromaterial",
@@ -111,8 +115,7 @@ Gib exakt dieses JSON-Schema zurück:
   "customer_number": null,
   "contract_number": null,
   "tags": ["Büro", "Steuer"],
-  "confidence": 0.95,
-  "reason": "Rechnung von Amazon mit Rechnungsdatum, Rechnungsnummer und Gesamtbetrag erkannt"
+  "confidence": 0.95
 }}
 """
 
@@ -121,9 +124,20 @@ Gib exakt dieses JSON-Schema zurück:
 # Optional fields are nullable instead of omittable: with a plain optional
 # property a model simply skips amount/document_date and the invoice then
 # fails validation for fields it never had a chance to report.
+# With grammar-constrained JSON the key order IS the generation order, and a
+# 4B model has to commit to every value the moment its key is emitted. The
+# original order asked for document_type and correspondent first, so both were
+# guessed from letterhead noise (Deutsche-Post-Franking, Betrage, Nummern)
+# before the model had said anything about the document: Grundsteuer- and
+# Steuerbescheide came back as "Versicherung"/"Allianz" while the last field,
+# reason, described the document correctly. Leading with reason makes the
+# model condition its own classification on its summary of the text. Measured
+# on paperless_id 52 at temperature 0: Allianz/Hausratversicherung before,
+# Stadt Hueckelhoven/Grundsteuerbescheid after, same runtime.
 RESPONSE_SCHEMA: dict = {
     "type": "object",
     "properties": {
+        "reason": {"type": "string"},
         "document_type": {"type": "string", "enum": list(DOCUMENT_TYPES)},
         "correspondent": {"type": "string"},
         "subject": {"type": "string"},
@@ -136,7 +150,6 @@ RESPONSE_SCHEMA: dict = {
         "contract_number": {"type": ["string", "null"]},
         "tags": {"type": "array", "items": {"type": "string"}},
         "confidence": {"type": "number"},
-        "reason": {"type": "string"},
     },
     "required": [
         "document_type",

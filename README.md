@@ -446,6 +446,35 @@ geladene Kontextgroesse, und `Invalid JSON from Ollama. Output length: ...` im
 Worker-Log meldet den Abbruch. Groessere Fenster kosten RAM und CPU-Zeit pro
 Dokument, also hochsetzen statt OCR-Texte zu zerhacken, solange die VM es hergibt.
 
+### Feldreihenfolge im JSON-Schema
+
+`RESPONSE_SCHEMA` in `app/prompts.py` erzeugt die Antwortfelder in der
+Reihenfolge seiner `properties`-Keys - bei grammatikgesteuerter Ausgabe ist das
+die Generierungsreihenfolge. Standen `document_type` und `correspondent` vorn,
+musste das Modell diese beiden Felder aus dem Briefkopf-Rausch entscheiden
+(Post-Fraenkungscode, Zahlenkolonnen, Betraege), bevor es irgend etwas zum
+Dokument gesagt hatte. Grundsteuer- und Vorauszahlungsbescheide kamen dadurch
+als `Versicherung` mit erfundenem Korrespondenten `Allianz` zurueck, waehrend
+das zuletzt generierte Feld `reason` dieselben Dokumente richtig als
+Grundsteuerbescheid beschrieb.
+
+Deshalb steht `reason` jetzt an erster Stelle, und zwar an drei Stellen
+gleichzeitig: im Schema, im Beispiel-JSON von `USER_PROMPT_TEMPLATE` und in der
+Feldregel des System-Prompts (maximal 25 Woerter, damit das Antwortfenster
+nicht zulaeuft). `tests/test_ollama_client.py` sichert die Reihenfolge ab - ein
+versehentlich zweites `reason`-Key im Dict-Literal wuerde den Test wieder
+brechen lassen, weil Python dann den letzten Key behaelt und `reason` damit
+wieder ans Ende rueckt.
+
+Beleglauf ueber 12 Dokumente des Bestands bei `temperature: 0`: mit alter
+Reihenfolge 9 von 12 korrekt, mit neuer 10 von 12. Der erfundene Korrespondent
+verschwindet vollstaendig - jeder ausgegebene Absender steht tatsaechlich im
+Dokument. Die zwei verbleibenden Abweichungen sind keine Halluzinationen,
+sondern echte Luecken der Taxonomie (`Praemienrechnung einer Versicherung`:
+`Rechnung` oder `Versicherung`, der Enum ist einwertig). Nebeneffekt: die
+Konfidenz sinkt bei Steuerbescheiden von 0.98 auf 0.85, es landet also mehr im
+Review statt im Auto-Approve - bei falschem Typ die gewuenschte Wirkung.
+
 ### Bestand nachtraeglich verarbeiten
 
 Standardmaessig bleibt dein Paperless-Bestand unangetastet: Beim ersten

@@ -16,6 +16,8 @@ from app.classifier import clip_words
 from app.config import settings
 from app.models import ClassificationResult
 from app.prompts import DOCUMENT_TYPES
+from app.prompts import RESPONSE_SCHEMA
+from app.prompts import USER_PROMPT_TEMPLATE
 from app.validator import validate_classification
 
 
@@ -206,3 +208,29 @@ def test_correspondent_from_a_footer_is_not_applied_automatically(
         result,
         document_head=head,
     ).reasons
+
+
+def test_reason_is_generated_before_the_classification_fields() -> None:
+    """The summary has to precede the enum, or a 4B model guesses blind.
+
+    With grammar-constrained output the schema key order IS the generation
+    order. While document_type and correspondent led, two Steuerbescheide came
+    back as "Versicherung"/"Allianz" with 0 occurrences of either word in the
+    OCR text, while reason - generated last - described them correctly.
+    """
+
+    keys = list(RESPONSE_SCHEMA["properties"])
+
+    assert keys[0] == "reason"
+    assert keys.index("reason") < keys.index("document_type")
+    assert keys.index("reason") < keys.index("correspondent")
+    assert set(RESPONSE_SCHEMA["required"]) <= set(keys)
+
+
+def test_prompt_example_matches_the_generation_order() -> None:
+    """The example is the strongest pattern signal, so it must not contradict
+    the schema order the grammar enforces."""
+
+    assert USER_PROMPT_TEMPLATE.index('"reason"') < USER_PROMPT_TEMPLATE.index(
+        '"document_type"'
+    )
