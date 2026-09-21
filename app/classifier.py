@@ -84,6 +84,35 @@ def sanitize_title_part(value: str | None) -> str:
     return value.strip("_")
 
 
+def clip_words(value: str, max_words: int, max_chars: int) -> str:
+    """Keep a model-generated phrase usable as a title component."""
+
+    value = " ".join(value.split())
+    if not value:
+        return value
+
+    # Cut on a clause boundary first: a truncated phrase must stay readable,
+    # so dropping a trailing incomplete fragment is better than one long word.
+    for separator in (",", ";", ":"):
+        if separator in value:
+            value = value.split(separator)[0].strip()
+
+    words = value.split(" ")
+    if len(words) > max_words:
+        value = " ".join(words[:max_words])
+
+    # Cut on whitespace, then on a separator, and only as a last resort hard,
+    # so that no word is split in the middle.
+    if len(value) > max_chars:
+        value = value[:max_chars].rstrip()
+        if " " in value:
+            value = value.rsplit(" ", 1)[0]
+        elif any(sep in value for sep in ",;:()"):
+            value = re.split(r"[,;:()]", value)[0]
+
+    return value.strip(" ,;:.()-")
+
+
 def build_document_title(result: ClassificationResult) -> str:
     """Build a deterministic Paperless title from structured fields."""
     parts: list[str] = []
@@ -91,9 +120,9 @@ def build_document_title(result: ClassificationResult) -> str:
     if result.document_type:
         parts.append(result.document_type)
     if result.correspondent:
-        parts.append(result.correspondent)
+        parts.append(clip_words(result.correspondent, 6, 45))
     if result.subject:
-        parts.append(result.subject)
+        parts.append(clip_words(result.subject, 5, 45))
     if result.document_date:
         parts.append(result.document_date)
     if result.amount:
@@ -308,7 +337,7 @@ class DocumentClassifier:
 
             confidence = get_result_confidence(result)
             reason = get_result_reason(result)
-            validation = validate_classification(result)
+            validation = validate_classification(result, document_head=ocr_excerpt)
 
             if not validation.valid:
                 return self._store_review(
