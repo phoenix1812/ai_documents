@@ -15,6 +15,7 @@ from app.db import Database
 from app.db import STATUS_AUTO_APPROVED
 from app.models import ClassificationResult
 from app.paperless_client import resolve_existing_name
+from app.paperless_client import to_display_case
 from app.review_ui import DEFAULT_CORRECTION_REASON
 from app.review_ui import save_document
 from app.validator import apply_tax_authority_type_rule
@@ -277,3 +278,80 @@ def test_the_rule_rewrites_the_title_before_paperless_sees_it(tmp_path, monkeypa
     assert classifier.process_document(document_id=60) == STATUS_AUTO_APPROVED
     assert applied["document_type"] == "Steuer"
     assert applied["title"].startswith("Steuer_Finanzamt_Erkelenz_")
+
+
+def test_a_shouted_sender_becomes_initial_capitals() -> None:
+    assert to_display_case("MANN GEBÄUDETECHNIK") == "Mann Gebäudetechnik"
+
+
+def test_a_name_with_lowercase_letters_keeps_its_own_styling() -> None:
+    assert to_display_case("ALTE LEIPZIGER Versicherung Aktiengesellschaft") == (
+        "ALTE LEIPZIGER Versicherung Aktiengesellschaft"
+    )
+
+
+def test_abbreviations_survive_the_rewrite() -> None:
+    assert to_display_case("BKK EUREGIO") == "BKK Euregio"
+    assert to_display_case("VOLKSWOHL BUND LEBENSVERSICHERUNG A.G.") == (
+        "Volkswohl Bund Lebensversicherung A.G."
+    )
+
+
+def test_an_empty_or_valueless_name_passes_through() -> None:
+    assert to_display_case("") == ""
+    assert to_display_case(None) == ""
+    assert to_display_case("1234 5678") == "1234 5678"
+
+
+def test_the_display_case_is_idempotent() -> None:
+    once = to_display_case("MANN GEBÄUDETECHNIK GMBH")
+    assert to_display_case(once) == once
+
+
+def test_the_classifier_stores_the_shouted_sender_in_nice_case(
+    tmp_path, monkeypatch
+) -> None:
+    """The rewrite has to happen before the title is built and before the row is
+    stored, otherwise the queue and the filename keep the shouted spelling."""
+
+    from types import SimpleNamespace
+
+    from app.classifier import DocumentClassifier
+
+    monkeypatch.setattr(settings, "db_path", str(tmp_path))
+    monkeypatch.setattr(settings, "dry_run", False)
+    monkeypatch.setattr(settings, "confidence_threshold", 0.90)
+
+    applied: dict = {}
+    classifier = DocumentClassifier.__new__(DocumentClassifier)
+    classifier.db = Database(str(tmp_path))
+    classifier.paperless = SimpleNamespace(
+        download_document=lambda document_id: b"pdf-bytes",
+        get_document=lambda document_id: {
+            "content": "Stadt Hückelhoven\nGrundsteuerbescheid 2025\nBetrag 312,40 EUR",
+            "title": "scan0002",
+        },
+        update_document_metadata_by_names=lambda **kwargs: (
+            applied.update(kwargs) or {"title": kwargs["title"]}
+        ),
+    )
+    classifier.ollama = SimpleNamespace(
+        classify=lambda content: ClassificationResult(
+            document_type="Steuer",
+            correspondent="STADT HÜCKELHOVEN",
+            title="unbenannt",
+            subject="Grundsteuerbescheid 2025",
+            document_date="2025-01-24",
+            confidence=0.95,
+            reason="Grundsteuerbescheid der Stadt Hückelhoven",
+        ),
+    )
+
+    assert classifier.process_document(document_id=77) == STATUS_AUTO_APPROVED
+    assert applied["correspondent"] == "Stadt Hückelhoven"
+
+    row = classifier.db.conn.execute(
+        "SELECT correspondent, title FROM documents WHERE paperless_id = 77"
+    ).fetchone()
+    assert row["correspondent"] == "Stadt Hückelhoven"
+    assert row["title"].startswith("Steuer_Stadt_Hückelhoven_")

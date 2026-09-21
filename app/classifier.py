@@ -27,6 +27,7 @@ from app.hash_store import sha256
 from app.models import ClassificationResult
 from app.ollama_client import OllamaClient
 from app.paperless_client import PaperlessClient
+from app.paperless_client import to_display_case
 from app.validator import apply_tax_authority_type_rule
 from app.validator import validate_classification
 
@@ -406,7 +407,8 @@ class DocumentClassifier:
 
             result.tags = clean_paperless_tags(result.tags)
 
-            # Before the title is built: document_type is a title component.
+            # Before the title is built: the correspondent is a title component.
+            result.correspondent = to_display_case(result.correspondent)
             applied_rule = apply_tax_authority_type_rule(result)
             result.title = build_document_title(result)
 

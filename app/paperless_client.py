@@ -32,6 +32,38 @@ def normalize_name(value: str | None) -> str:
     return re.sub(r"[^0-9a-zäöüß]+", " ", (value or "").casefold()).strip()
 
 
+VOWEL_RE = re.compile(r"[aeiouäöüéèêàù]", re.IGNORECASE)
+
+
+def to_display_case(name: str | None) -> str:
+    """Turn a shouted sender name into initial-capitals form.
+
+    German letterheads set whole company names in capitals and a 4B model copies
+    that, which produced "MANN GEBÄUDETECHNIK" next to the real "Mann
+    Gebäudetechnik GmbH". A name containing any lowercase letter keeps its
+    spelling: that is the issuer's own styling, as in "ALTE LEIPZIGER
+    Versicherung Aktiengesellschaft". Tokens without a vowel and single letters
+    stay uppercase because they are abbreviations (BKK, AG, "a.G.").
+
+    Only spellings that do not exist in Paperless yet reach this form - an
+    established one is picked earlier by resolve_existing_name, which compares
+    case-insensitively.
+    """
+
+    value = (name or "").strip()
+    letters = [char for char in value if char.isalpha()]
+    if not letters or not all(char.isupper() for char in letters):
+        return value
+
+    def capitalize_token(match: re.Match[str]) -> str:
+        token = match.group(0)
+        if len(token) == 1 or not VOWEL_RE.search(token):
+            return token
+        return token[0] + token[1:].lower()
+
+    return re.sub(r"\w+", capitalize_token, value)
+
+
 def resolve_existing_name(
     wanted: str,
     existing: list[dict[str, Any]],
@@ -211,7 +243,7 @@ class PaperlessClient:
         if match is not None:
             return int(match["id"])
 
-        return self._get_or_create_named_id("/api/correspondents/", clean_name)
+        return self._get_or_create_named_id("/api/correspondents/", to_display_case(clean_name))
 
     def get_documents(self) -> list[dict[str, Any]]:
         """Load all available documents."""

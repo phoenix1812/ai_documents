@@ -394,7 +394,7 @@ ihr neu gebauter Titel enthaelt deshalb nur Dokumenttyp und Korrespondent.
 
 Jede Freigabe, Korrektur und Ablehnung landet in der Tabelle `review_decisions`
 (`app/db.py:214`). Frueher war das ein reines Protokoll - der Klassifikator hat es
-nie gelesen. Drei Muster daraus sind jetzt als deterministische Regeln eingebaut,
+nie gelesen. Vier Muster daraus sind jetzt als deterministische Regeln eingebaut,
 weil ein 4B-Modell sie auch nach dem Prompt-Fix nicht zuverlaessig selbst trifft:
 
 - **Finanzamt => Steuer** (`apply_tax_authority_type_rule`, `app/validator.py`).
@@ -412,6 +412,14 @@ weil ein 4B-Modell sie auch nach dem Prompt-Fix nicht zuverlaessig selbst trifft
   bei Mehrdeutigkeit derjenige mit den meisten Dokumenten). Aufloesung statt Raten:
   zwei gleich starke Kandidaten fuehren zu keinem Match, dann entsteht wie bisher
   ein neuer Name.
+- **Groeschriebene Absendernamen** (`to_display_case`, `app/paperless_client.py`).
+  Briefkoepfe stehen oft komplett in Grossbuchstaben und ein 4B-Modell kopiert
+  das: `MANN GEBÄUDETECHNIK` lief neben `Mann Gebäudetechnik GmbH` ein. Nur Namen
+  ohne einen einzigen Kleinbuchstaben werden umgeschrieben, vokallose Kuerzel
+  (`BKK`, `GMBH`) und Einzelbuchstaben (`A.G.`) bleiben gross, und eine
+  Schreibweise mit Kleinbuchstaben gilt als eigene Gestaltung der Firma
+  (`ALTE LEIPZIGER Versicherung Aktiengesellschaft`). Sie laeuft im Classifier vor
+  dem Titelbau und zusaetzlich beim Anlegen des Korrespondenten.
 - **Funktion statt Absender** im System-Prompt: Zahlungsaufruf mit Betrag und
   Faelligkeitsdatum ist `Rechnung` (auch von einer Versicherung), was den Vertrag
   selbst betrifft ist `Versicherung`, Behoerdenbescheid ueber Abgaben ist
