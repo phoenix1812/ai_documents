@@ -410,6 +410,19 @@ class DocumentClassifier:
             # Before the title is built: the correspondent is a title component.
             result.correspondent = to_display_case(result.correspondent)
             applied_rule = apply_tax_authority_type_rule(result)
+
+            # Tags come from his own approved set whenever that key is decided;
+            # an undecided key must not invent tag names in Paperless.
+            proposed_tags = sorted(
+                {tag.strip() for tag in result.tags if tag.strip()},
+                key=str.casefold,
+            )
+            kernel_tags = self.db.tag_kernel(result.correspondent, result.document_type)
+            tag_deviation = bool(kernel_tags) and kernel_tags != proposed_tags
+            unknown_tags = [] if kernel_tags else self.paperless.unknown_tag_names(proposed_tags)
+            if kernel_tags:
+                result.tags = list(kernel_tags)
+
             result.title = build_document_title(result)
 
             confidence = get_result_confidence(result)
@@ -434,6 +447,43 @@ class DocumentClassifier:
                     document_type=result.document_type,
                     tags=result.tags,
                     reasons=validation.reasons,
+                    confidence=confidence,
+                    reason=reason,
+                    original_title=original_title,
+                    ocr_excerpt=ocr_excerpt,
+                    paperless_url=paperless_url,
+                    subject=result.subject,
+                    document_date=result.document_date,
+                )
+
+            tag_reasons: list[str] = []
+            if tag_deviation:
+                tag_reasons.append(
+                    "Die KI-Tags passen nicht zu dem, was du fuer diesen Absender und "
+                    "Dokumenttyp freigegeben hast: " + ", ".join(kernel_tags)
+                )
+                reason = f"{reason} | Regel: Kern-Tags uebernommen".strip(" |")
+            if unknown_tags:
+                tag_reasons.append(
+                    "Paperless kennt diese Tags nicht, und sie stammen nicht von dir: "
+                    + ", ".join(unknown_tags)
+                )
+
+            if tag_reasons:
+                logger.info(
+                    "Tag rule needs the operator for document %s: %s",
+                    document_id,
+                    " | ".join(tag_reasons),
+                )
+                return self._store_review(
+                    document_id=document_id,
+                    file_hash=file_hash,
+                    ocr_hash=ocr_hash,
+                    title=result.title,
+                    correspondent=result.correspondent,
+                    document_type=result.document_type,
+                    tags=result.tags,
+                    reasons=tag_reasons,
                     confidence=confidence,
                     reason=reason,
                     original_title=original_title,

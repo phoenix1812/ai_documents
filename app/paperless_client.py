@@ -229,6 +229,18 @@ class PaperlessClient:
     def get_or_create_tag_id(self, name: str) -> int | None:
         return self._get_or_create_named_id("/api/tags/", name)
 
+    def unknown_tag_names(self, names: list[str]) -> list[str]:
+        """Tags the model proposed that Paperless does not carry under that name.
+
+        Compared by exact normalized name, without containment: tag names are
+        short, and "Heizung" inside "Heizungsbau" would silently merge two
+        subjects. An unknown name is his decision, not something the worker
+        should create on its own.
+        """
+
+        existing = {normalize_name(item.get("name")) for item in self._get_paginated("/api/tags/")}
+        return [name for name in names if normalize_name(name) not in existing]
+
     def get_or_create_document_type_id(self, name: str) -> int | None:
         return self._get_or_create_named_id("/api/document_types/", name)
 

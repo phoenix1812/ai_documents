@@ -394,7 +394,7 @@ ihr neu gebauter Titel enthaelt deshalb nur Dokumenttyp und Korrespondent.
 
 Jede Freigabe, Korrektur und Ablehnung landet in der Tabelle `review_decisions`
 (`app/db.py:214`). Frueher war das ein reines Protokoll - der Klassifikator hat es
-nie gelesen. Vier Muster daraus sind jetzt als deterministische Regeln eingebaut,
+nie gelesen. Sechs Muster daraus sind jetzt als deterministische Regeln eingebaut,
 weil ein 4B-Modell sie auch nach dem Prompt-Fix nicht zuverlaessig selbst trifft:
 
 - **Finanzamt => Steuer** (`apply_tax_authority_type_rule`, `app/validator.py`).
@@ -426,6 +426,21 @@ weil ein 4B-Modell sie auch nach dem Prompt-Fix nicht zuverlaessig selbst trifft
   `Steuer`,
   und einen Absender ohne Beleg im Text soll das Modell leer lassen statt ihn zu
   erfinden.
+- **Kern-Tags aus deinen Entscheidungen** (`tag_kernel`, `app/db.py`). Der
+  Schluessel ist `(Absender, Dokumenttyp)`; hast du fuer diesen Schluessel genau
+  eine Tag-Menge freigegeben, ersetzt der Worker die Antwort des Modells dadurch
+  (`app/classifier.py`, vor dem Titelbau). Zwei verschiedene Mengen sind keine
+  Regel sondern eine offene Frage und werden weder gemittelt noch geraten - dann
+  entscheidet weiterhin das Modell. Weichen die Modell-Tags vom Kern ab, geht das
+  Dokument trotz hoher Konfidenz in die Review statt automatisch durch. Ein Tag,
+  das Paperless nicht kennt und das nie von dir freigegeben wurde, legt der Worker
+  gar nicht erst an (`unknown_tag_names`, `app/paperless_client.py`); solche
+  Dokumente landen bei dir. Die Review-UI darf weiterhin Tags anlegen, denn dort
+  ist es dein Klick.
+
+  Auf dem echten Bestand haben 10 von 13 Schluesseln einen Kern. Kernlos sind
+  `Finanzamt Erkelenz / Steuer`, `Mann Gebaeudetechnik GmbH / Rechnung` und
+  `BKK EUREGIO / Versicherung` - genau die drei mit mehreren freigegebenen Mengen.
 
 Die Review-UI macht den Rest sichtbar: `/learning` gruppiert die Historie nach
 `KI-Typ -> korrigierter Typ` und `KI-Absender -> korrigierter Absender` statt nur

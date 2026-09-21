@@ -7,12 +7,15 @@ that Paperless would otherwise create a second time.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi import HTTPException
 
 from app.config import settings
 from app.db import Database
 from app.db import STATUS_AUTO_APPROVED
+from app.db import STATUS_NEEDS_REVIEW
 from app.models import ClassificationResult
 from app.paperless_client import resolve_existing_name
 from app.paperless_client import to_display_case
@@ -262,6 +265,7 @@ def test_the_rule_rewrites_the_title_before_paperless_sees_it(tmp_path, monkeypa
         update_document_metadata_by_names=lambda **kwargs: (
             applied.update(kwargs) or {"title": kwargs["title"]}
         ),
+        unknown_tag_names=lambda names: [],
     )
     classifier.ollama = SimpleNamespace(
         classify=lambda content: ClassificationResult(
@@ -334,6 +338,7 @@ def test_the_classifier_stores_the_shouted_sender_in_nice_case(
         update_document_metadata_by_names=lambda **kwargs: (
             applied.update(kwargs) or {"title": kwargs["title"]}
         ),
+        unknown_tag_names=lambda names: [],
     )
     classifier.ollama = SimpleNamespace(
         classify=lambda content: ClassificationResult(
@@ -355,3 +360,140 @@ def test_the_classifier_stores_the_shouted_sender_in_nice_case(
     ).fetchone()
     assert row["correspondent"] == "Stadt Hückelhoven"
     assert row["title"].startswith("Steuer_Stadt_Hückelhoven_")
+
+
+def _approved(db, *, paperless_id, correspondent, document_type, tags) -> None:
+    db.insert_review_decision(
+        document_db_id=paperless_id,
+        paperless_id=paperless_id,
+        action="saved",
+        original_ai_title="titel",
+        original_ai_correspondent=correspondent,
+        original_ai_document_type=document_type,
+        original_ai_tags=["Plunder"],
+        final_title="titel",
+        final_correspondent=correspondent,
+        final_document_type=document_type,
+        final_tags=tags,
+        reason="Testentscheidung",
+    )
+
+
+def _classifier(tmp_path, monkeypatch, *, tags, unknown_tags=(), confidence=0.98):
+    """Worker with the model, Paperless and the queue replaced by fakes."""
+
+    from types import SimpleNamespace
+
+    from app.classifier import DocumentClassifier
+
+    monkeypatch.setattr(settings, "db_path", str(tmp_path))
+    monkeypatch.setattr(settings, "dry_run", False)
+    monkeypatch.setattr(settings, "confidence_threshold", 0.90)
+
+    applied: dict = {}
+    classifier = DocumentClassifier.__new__(DocumentClassifier)
+    classifier.db = Database(str(tmp_path))
+    classifier.paperless = SimpleNamespace(
+        download_document=lambda document_id: b"pdf-bytes",
+        get_document=lambda document_id: {
+            "content": "Stadt Hückelhoven\nGrundsteuerbescheid\nBetrag 312,40 EUR",
+            "title": "scan",
+        },
+        update_document_metadata_by_names=lambda **kwargs: (
+            applied.update(kwargs) or {"title": kwargs["title"]}
+        ),
+        unknown_tag_names=lambda names: list(unknown_tags),
+    )
+    classifier.ollama = SimpleNamespace(
+        classify=lambda content: ClassificationResult(
+            document_type="Steuer",
+            correspondent="Stadt Hückelhoven",
+            title="unbenannt",
+            subject="Grundsteuerbescheid",
+            document_date="2026-01-23",
+            confidence=confidence,
+            reason="Grundsteuerbescheid der Stadt",
+            tags=tags,
+        ),
+    )
+    return classifier, applied
+
+
+def _stored(classifier, paperless_id):
+    return classifier.db.conn.execute(
+        "SELECT status, tags, error_message FROM documents WHERE paperless_id = ?",
+        (paperless_id,),
+    ).fetchone()
+
+
+def test_the_kernel_is_the_one_set_he_approved(tmp_path) -> None:
+    db = Database(str(tmp_path))
+    _approved(
+        db,
+        paperless_id=52,
+        correspondent="Stadt Hückelhoven",
+        document_type="Steuer",
+        tags=["Grundsteuer", "Nebenkosten", "Grundstück"],
+    )
+
+    assert db.tag_kernel("STADT HÜCKELHOVEN", "steuer") == [
+        "Grundsteuer",
+        "Grundstück",
+        "Nebenkosten",
+    ]
+
+
+def test_a_key_with_two_approved_sets_is_no_rule(tmp_path) -> None:
+    db = Database(str(tmp_path))
+    _approved(db, paperless_id=37, correspondent="Finanzamt Erkelenz",
+              document_type="Steuer", tags=["Einkommensteuer", "Vorauszahlung"])
+    _approved(db, paperless_id=38, correspondent="Finanzamt Erkelenz",
+              document_type="Steuer", tags=["Einkommensteuer", "Festsetzung"])
+
+    assert db.tag_kernel("Finanzamt Erkelenz", "Steuer") is None
+
+
+def test_only_the_last_decision_per_document_counts(tmp_path) -> None:
+    db = Database(str(tmp_path))
+    _approved(db, paperless_id=52, correspondent="Stadt Hückelhoven",
+              document_type="Steuer", tags=["Grundsteuer", "Gebühren"])
+    _approved(db, paperless_id=52, correspondent="Stadt Hückelhoven",
+              document_type="Steuer", tags=["Grundsteuer", "Nebenkosten"])
+
+    assert db.tag_kernel("Stadt Hückelhoven", "Steuer") == ["Grundsteuer", "Nebenkosten"]
+
+
+def test_an_unknown_key_has_no_kernel(tmp_path) -> None:
+    assert Database(str(tmp_path)).tag_kernel("ERGO", "Versicherung") is None
+
+
+def test_a_second_groundsteuer_bescheid_gets_the_same_tags(tmp_path, monkeypatch) -> None:
+    """pid 52 gegen pid 54: gleiches Jahr-Muster, andere OCR, gleiche Tags."""
+
+    classifier, applied = _classifier(tmp_path, monkeypatch, tags=["Grundsteuer", "Gebühren", "Zähler"])
+    _approved(classifier.db, paperless_id=52, correspondent="Stadt Hückelhoven",
+              document_type="Steuer", tags=["Grundsteuer", "Nebenkosten", "Grundstück"])
+
+    assert classifier.process_document(document_id=54) == STATUS_NEEDS_REVIEW
+
+    row = _stored(classifier, 54)
+    assert json.loads(row["tags"]) == ["Grundsteuer", "Grundstück", "Nebenkosten"]
+    assert "freigegeben hast" in row["error_message"]
+    assert applied == {}
+
+
+def test_a_tag_paperless_does_not_know_is_not_created_silently(tmp_path, monkeypatch) -> None:
+    classifier, applied = _classifier(
+        tmp_path, monkeypatch, tags=["Grundsteuer", "Zähler"], unknown_tags=["Zähler"]
+    )
+
+    assert classifier.process_document(document_id=55) == STATUS_NEEDS_REVIEW
+    assert "Zähler" in _stored(classifier, 55)["error_message"]
+    assert applied == {}
+
+
+def test_a_known_tag_set_without_kernel_still_auto_approves(tmp_path, monkeypatch) -> None:
+    classifier, applied = _classifier(tmp_path, monkeypatch, tags=["Grundsteuer", "Steuer"])
+
+    assert classifier.process_document(document_id=56) == STATUS_AUTO_APPROVED
+    assert applied["tags"] == ["Grundsteuer", "Steuer"]

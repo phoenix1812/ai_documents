@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import settings
+from app.paperless_client import normalize_name
 
 STATUS_DONE = "DONE"
 STATUS_AUTO_APPROVED = "AUTO_APPROVED"
@@ -728,6 +729,45 @@ class Database:
                 "final_correspondent",
             ),
         }
+
+    def tag_kernel(self, correspondent: str | None, document_type: str | None) -> list[str] | None:
+        """Return the tag set he approved for this sender and document type.
+
+        A key with exactly one approved set is a rule he already made. Several
+        sets are an open question, so they are returned as None instead of being
+        averaged or guessed. Rejections carry no final tags, and only the last
+        decision per document counts.
+        """
+
+        wanted = (normalize_name(correspondent), (document_type or "").strip().casefold())
+        if not wanted[0] or not wanted[1]:
+            return None
+
+        latest: dict[int, sqlite3.Row] = {}
+        for row in self.conn.execute(
+            """
+            SELECT paperless_id, final_correspondent, final_document_type, final_tags
+            FROM review_decisions
+            ORDER BY id
+            """
+        ).fetchall():
+            latest[int(row["paperless_id"])] = row
+
+        approved: set[tuple[str, ...]] = set()
+        for row in latest.values():
+            key = (
+                normalize_name(row["final_correspondent"]),
+                (row["final_document_type"] or "").strip().casefold(),
+            )
+            if key != wanted:
+                continue
+            tags = self.parse_json_list(row["final_tags"])
+            if tags:
+                approved.add(tuple(sorted(tags, key=str.casefold)))
+
+        if len(approved) != 1:
+            return None
+        return list(approved.pop())
 
     def integrity_check(self) -> str:
         row = self.conn.execute("PRAGMA integrity_check").fetchone()
