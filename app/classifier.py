@@ -251,8 +251,17 @@ class DocumentClassifier:
         duplicate_row: dict | None,
     ) -> str:
         duplicate_of_paperless_id = None
+        original_title = None
         if duplicate_row is not None:
             duplicate_of_paperless_id = duplicate_row.get("paperless_id")
+            original_title = duplicate_row.get("title")
+
+        detail = self._mark_duplicate(
+            document_id=document_id,
+            duplicate_of_paperless_id=duplicate_of_paperless_id,
+            original_title=original_title,
+            duplicate_reason=duplicate_reason,
+        )
 
         synthetic_hash = f"{file_hash}-{document_id}-{duplicate_reason}"
         self.db.insert_document(
@@ -272,9 +281,42 @@ class DocumentClassifier:
             paperless_url=build_paperless_document_url(document_id),
             export_path="",
             status=STATUS_SKIPPED_DUPLICATE,
-            error_message=f"Duplicate detected by {duplicate_reason}",
+            error_message=f"Duplicate detected by {duplicate_reason}; {detail}",
         )
         return STATUS_SKIPPED_DUPLICATE
+
+    def _mark_duplicate(
+        self,
+        document_id: int,
+        duplicate_of_paperless_id: int | None,
+        original_title: str | None,
+        duplicate_reason: str,
+    ) -> str:
+        """Point the duplicate at its original inside Paperless.
+
+        The document itself is created by Paperless' consumer before this code
+        runs, so the only remaining action is a visible marker for the human
+        who decides whether to delete it.
+        """
+        if settings.dry_run:
+            return "not marked (dry run)"
+
+        if duplicate_of_paperless_id is None:
+            return "original unknown, nothing marked"
+
+        try:
+            marking = self.paperless.mark_as_duplicate(
+                document_id=document_id,
+                original_id=int(duplicate_of_paperless_id),
+                original_title=original_title,
+                duplicate_reason=duplicate_reason,
+            )
+        except (requests.RequestException, ValueError) as exc:
+            # A missing marker must not turn a skipped duplicate into a failure.
+            logger.warning("Could not mark duplicate %s: %s", document_id, exc)
+            return f"marking failed: {exc}"
+
+        return "marked in Paperless" + ("" if marking["tag_added"] else " (tag already set)")
 
     def process_document(self, document_id: int) -> str:
         file_hash = ""

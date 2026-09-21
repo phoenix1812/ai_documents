@@ -326,13 +326,34 @@ Aehnlichkeits- oder Unschaerfeprüfung. „Wahrscheinlich" heisst nur, dass die
 PDF-Bytes unterschiedlich sind, der normalisierte OCR-Text aber Zeiger fuer
 Zeiger identisch sein muss. Ein erneuter Scan desselben Blatts wird dadurch
 regelmaendig *nicht* als Duplikat erkannt: Scanner-OCR wiederholt Kopfzeilen
-und liest Randobjekte anders. Die Stufen 1 und 2 erkennen also Neu-Importe derselben Datei, nicht Neu-Scans.
+und liest Randobjekte anders. Die Stufen 1 und 2 erkennen also Neu-Importe
+derselben Datei, nicht Neu-Scans.
 Gemessen am 2026-09-21 an einem iPad-PDF und seinem Scan: 964 vs. 1209 Zeichen,
 Aehnlichkeit 0.65, beide Hashes verschieden.
 
 Beim Reprocess wird das aktuelle Paperless-Dokument aus der Duplikatpruefung
 ausgeschlossen. Dadurch wird ein Dokument nicht faelschlich als Duplikat von
 sich selbst markiert.
+
+### Was mit einem Duplikat passiert
+
+Der Worker loescht und klassifiziert nichts an dieser Stelle. Paperless hat das
+Dokument zu diesem Zeitpunkt schon selbst aufgenommen, also kann die Pipeline
+die Aufnahme nicht mehr verhindern - nur sichtbar machen, dass es ein Duplikat
+ist:
+
+- Tag `Duplikat` (vorhandene Tags bleiben erhalten)
+- Paperless-Notiz mit Verweis auf das Original, zum Beispiel
+  `Duplikat von #38 (Versicherung_Allianz): identischer OCR-Text.`
+- SQLite-Zeile mit `SKIPPED_DUPLICATE`, `duplicate_of_paperless_id` und
+  `duplicate_reason`
+
+In der Review-UI zeigt „Alle Dokumente" bei solchen Zeilen zusaetzlich
+`Duplikat von #38` als Link auf das Original, und der Statusfilter
+`SKIPPED_DUPLICATE` listet alle Funde auf, um sie selbst zu loeschen.
+Loeschen bleibt Handarbeit. Im Dry-Run unterbleibt der Schreibzugriff auf
+Paperless; ein fehlgeschlagenes Markieren macht aus dem `SKIPPED_DUPLICATE`
+keinen Fehler, sondern steht in der Fehlermeldung der Zeile.
 
 ## Titel-Format
 
@@ -381,6 +402,8 @@ Wichtige Variablen:
 | `PAPERLESS_HEALTHCHECK_URL` | Abweichende URL fuer den Paperless-Healthcheck, Standard `PAPERLESS_URL` |
 | `OLLAMA_URL` | Interne Ollama-URL |
 | `OLLAMA_MODEL` | Modellname fuer Klassifikation und Readiness-Check |
+| `OLLAMA_NUM_CTX` | Kontextfenster pro Klassifikation, Standard `8192` |
+| `OCR_MAX_CHARS` | OCR-Zeichen im Prompt; leer leitet den Wert aus `OLLAMA_NUM_CTX` ab |
 | `DB_PATH` | Verzeichnis fuer `documents.db` |
 | `AI_WORKER_TRIGGER_URL` | Queue-Trigger des AI-Workers |
 | `TRIGGER_PORT` | Port des Trigger-Servers, im Compose-Setup `8080` |
@@ -402,6 +425,26 @@ Wichtige Variablen:
 
 `SQLITE_PATH` wird fuer alte Setups weiterhin akzeptiert. Intern verwendet die
 App aber `DB_PATH` als Verzeichnis und legt darin `documents.db` an.
+
+### Kontextfenster und lange OCR-Texte
+
+Die Kuerzung des OCR-Textes muss zum Modellfenster passen. Ollama laedt gemma3
+standardmaessig mit 4096 Token; ein Steuerbescheid mit rund 9.000 OCR-Zeichen
+fuellt das Fenster damit allein, die JSON-Antwort wird nach 42 Token
+abgebrochen (`done_reason: length`) und `json.loads` meldet `Unterminated
+string` - als Fehlerbild ein `FAILED_LLM` ohne Titel. Deshalb uebergibt der
+Worker `num_ctx` aus `OLLAMA_NUM_CTX` (Standard 8192) und leitet daraus das
+OCR-Budget ab: `(num_ctx - 1500) * 2.2` Zeichen, bei 8192 also rund 14.700.
+
+Passt die Antwort trotzdem nicht, wird ein zweiter Versuch mit der Haelfte des
+Budgets gemacht und erst danach `FAILED_LLM`. Frueher sendete der Client
+fuenf mal denselben Prompt, weil `temperature: 0` die Kuerzung reproduziert -
+bei 4.000 Eingabe-Token war das spuerbare Rechenzeit ohne neues Ergebnis.
+
+Sichtbar im Betrieb: `docker exec ollama ollama ps` zeigt die tatsaechlich
+geladene Kontextgroesse, und `Invalid JSON from Ollama. Output length: ...` im
+Worker-Log meldet den Abbruch. Groessere Fenster kosten RAM und CPU-Zeit pro
+Dokument, also hochsetzen statt OCR-Texte zu zerhacken, solange die VM es hergibt.
 
 ### Bestand nachtraeglich verarbeiten
 

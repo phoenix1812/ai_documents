@@ -25,6 +25,10 @@ class Settings:
 
         self.ollama_model = os.getenv("OLLAMA_MODEL", "llama3")
         self.ollama_url = os.getenv("OLLAMA_URL", "http://ollama:11434").rstrip("/")
+        self.ollama_num_ctx = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
+
+        # Optional override. Without it the OCR budget is derived from the window.
+        self.ocr_max_chars = int(os.getenv("OCR_MAX_CHARS", "0"))
 
         # Directory containing documents.db.
         self.db_path = os.getenv("DB_PATH", "/data")
@@ -76,6 +80,15 @@ class Settings:
         self.healthcheck_timeout_seconds = int(
             os.getenv("HEALTHCHECK_TIMEOUT_SECONDS", "3")
         )
+
+    @property
+    def ocr_context_chars(self) -> int:
+        """Largest OCR excerpt that still leaves room for the JSON answer."""
+        if self.ocr_max_chars > 0:
+            return self.ocr_max_chars
+
+        # About 2.2 German characters per gemma3 token, minus prompt and answer.
+        return max(1000, int((self.ollama_num_ctx - 1500) * 2.2))
 
 
 settings = Settings()

@@ -88,7 +88,16 @@
                 <td><a class="id-link" href="/items/{{ item.id }}">{{ item.id }}</a></td>
                 <td>{{ item.paperless_id }}</td>
                 <td><span class="badge status-{{ (item.status or 'unknown')|lower|replace('_', '-') }}">{{ item.status }}</span></td>
-                <td class="title-cell">{{ item.title or item.original_title or "—" }}</td>
+                <td class="title-cell">
+                  {{ item.title or item.original_title or "—" }}
+                  {% if item.duplicate_of_paperless_id %}
+                    <div class="muted">
+                      Duplikat von
+                      <a href="{{ item.duplicate_of_url }}" target="_blank" rel="noopener noreferrer">#{{ item.duplicate_of_paperless_id }}</a>
+                      ({{ item.duplicate_reason or "unbekannter Grund" }})
+                    </div>
+                  {% endif %}
+                </td>
                 <td>{{ item.document_type or "—" }}</td>
                 <td>{{ item.correspondent or "—" }}</td>
                 <td>

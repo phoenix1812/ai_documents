@@ -21,6 +21,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from app.classifier import build_paperless_document_url
 from app.classifier import rebuild_title_from_stored_fields
 from app.config import settings
 from app.db import (
@@ -35,6 +36,7 @@ from app.db import (
     STATUS_MANUALLY_APPROVED,
     STATUS_NEEDS_REVIEW,
     STATUS_REVIEW_REQUIRED,
+    STATUS_SKIPPED_DUPLICATE,
 )
 from app.paperless_client import PaperlessClient
 from app.reprocess import enqueue_paperless_document, retry_failed_document
@@ -90,6 +92,7 @@ ALL_STATUS_FILTERS = (
     STATUS_NEEDS_REVIEW,
     STATUS_REVIEW_REQUIRED,
     STATUS_DRY_RUN,
+    STATUS_SKIPPED_DUPLICATE,
     *FAILED_STATUSES,
     STATUS_IGNORED,
 )
@@ -145,6 +148,11 @@ def normalize_item(item: dict[str, Any] | None) -> dict[str, Any] | None:
         STATUS_REVIEW_REQUIRED,
         STATUS_DRY_RUN,
     }
+
+    original_id = item.get("duplicate_of_paperless_id")
+    item["duplicate_of_url"] = (
+        build_paperless_document_url(int(original_id)) if original_id else ""
+    )
 
     return item
 

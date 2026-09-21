@@ -7,6 +7,7 @@ Responsible for:
 - updating metadata
 - resolving names to Paperless IDs
 - creating missing tags, document types and correspondents
+- marking a detected duplicate with a tag and a note about its original
 """
 
 from typing import Any
@@ -14,6 +15,35 @@ from typing import Any
 import requests
 
 from app.config import settings
+
+DUPLICATE_TAG_NAME = "Duplikat"
+
+DUPLICATE_REASON_LABELS = {
+    "file_hash": "identische PDF-Datei",
+    "ocr_hash": "identischer OCR-Text",
+}
+
+
+def format_duplicate_note(
+    original_id: int,
+    original_title: str | None,
+    duplicate_reason: str,
+) -> str:
+    """Build the Paperless note that points a duplicate at its original."""
+
+    reason = DUPLICATE_REASON_LABELS.get(duplicate_reason, duplicate_reason)
+    title = (original_title or "").strip()
+
+    if title:
+        return (
+            f"Duplikat von #{original_id} ({title}): {reason}. "
+            "Dieses Dokument wurde nicht klassifiziert."
+        )
+
+    return (
+        f"Duplikat von #{original_id}: {reason}. "
+        "Dieses Dokument wurde nicht klassifiziert."
+    )
 
 
 class PaperlessClient:
@@ -189,6 +219,43 @@ class PaperlessClient:
         )
 
         return payload
+
+    def mark_as_duplicate(
+        self,
+        document_id: int,
+        original_id: int,
+        original_title: str | None,
+        duplicate_reason: str,
+    ) -> dict[str, Any]:
+        """Tag a duplicate in Paperless and point a note at its original.
+
+        Existing tags are kept: the PATCH sends the merged list, because
+        Paperless replaces the tag set it is given.
+        """
+        current_tags = list(self.get_document(document_id).get("tags") or [])
+        tag_id = self.get_or_create_tag_id(DUPLICATE_TAG_NAME)
+        tag_added = tag_id is not None and tag_id not in current_tags
+
+        if tag_added:
+            self.update_document(
+                document_id=document_id,
+                payload={"tags": [*current_tags, tag_id]},
+            )
+
+        note = format_duplicate_note(
+            original_id=original_id,
+            original_title=original_title,
+            duplicate_reason=duplicate_reason,
+        )
+        response = requests.post(
+            self._url(f"/api/documents/{document_id}/notes/"),
+            headers=self.headers,
+            json={"note": note, "is_note": True},
+            timeout=30,
+        )
+        response.raise_for_status()
+
+        return {"tag_added": tag_added, "note": note}
 
     def download_document(self, document_id: int) -> bytes:
         """Download document as raw bytes."""

@@ -16,6 +16,7 @@ import re
 
 import ollama
 from tenacity import retry
+from tenacity import retry_if_not_exception_type
 from tenacity import stop_after_attempt
 from tenacity import wait_fixed
 
@@ -82,14 +83,20 @@ def normalize_ocr_text(content: str) -> str:
     return "\n".join(lines)
 
 
-def build_relevant_ocr_context(content: str, max_chars: int = 16000) -> str:
+def build_relevant_ocr_context(
+    content: str,
+    max_chars: int | None = None,
+) -> str:
     """Build a useful OCR excerpt for classification.
 
-    Instead of blindly sending content[:12000], keep:
+    Instead of blindly sending content[:max_chars], keep:
     - the beginning, because sender and title are often there
     - the end, because totals, payment info and signatures are often there
     - lines containing important document keywords
     """
+
+    if max_chars is None:
+        max_chars = settings.ocr_context_chars
 
     text = normalize_ocr_text(content)
 
@@ -204,15 +211,49 @@ class OllamaClient:
     @retry(
         stop=stop_after_attempt(5),
         wait=wait_fixed(2),
+        # Transport errors deserve a retry, a truncated answer does not: at
+        # temperature 0 the identical prompt would be cut off identically again.
+        retry=retry_if_not_exception_type((json.JSONDecodeError, ValueError)),
         reraise=True,
     )
     def classify(self, content: str) -> ClassificationResult:
         """Send OCR text to Ollama for classification."""
 
-        selected_content = build_relevant_ocr_context(content)
+        truncated_at: list[int] = []
+
+        for max_chars in self.ocr_budgets():
+            raw, done_reason = self._request(content, max_chars)
+
+            if done_reason == "length":
+                truncated_at.append(max_chars)
+                logger.warning(
+                    "Ollama answer cut off at %s OCR characters.", max_chars
+                )
+                continue
+
+            return self._parse(raw)
+
+        raise ValueError(
+            "Ollama truncated the answer for every OCR budget "
+            f"{truncated_at}. Raise OLLAMA_NUM_CTX or lower OCR_MAX_CHARS."
+        )
+
+    @staticmethod
+    def ocr_budgets() -> list[int]:
+        """OCR sizes to try, largest first, then one smaller fallback."""
+
+        max_chars = settings.ocr_context_chars
+        fallback = max(2000, max_chars // 2)
+
+        return [max_chars] if fallback == max_chars else [max_chars, fallback]
+
+    def _request(self, content: str, max_chars: int) -> tuple[str, str]:
+        selected_content = build_relevant_ocr_context(content, max_chars=max_chars)
         prompt = USER_PROMPT_TEMPLATE.format(content=selected_content)
 
-        logger.info("Sending document to Ollama")
+        logger.info(
+            "Sending document to Ollama: %s OCR characters", len(selected_content)
+        )
 
         response = self.client.chat(
             model=settings.ollama_model,
@@ -229,14 +270,18 @@ class OllamaClient:
             format=RESPONSE_SCHEMA,
             options={
                 "temperature": 0,
+                "num_ctx": settings.ollama_num_ctx,
             },
         )
 
-        raw = response["message"]["content"]
-        raw = _strip_code_fences(raw)
+        raw = _strip_code_fences(response["message"]["content"])
+        done_reason = str(response.get("done_reason") or "")
 
         logger.debug("RAW OLLAMA OUTPUT: %s", raw)
 
+        return raw, done_reason
+
+    def _parse(self, raw: str) -> ClassificationResult:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
