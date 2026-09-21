@@ -20,6 +20,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from app.config import settings
+
 STATUS_DONE = "DONE"
 STATUS_AUTO_APPROVED = "AUTO_APPROVED"
 STATUS_MANUALLY_APPROVED = "MANUALLY_APPROVED"
@@ -64,6 +66,16 @@ FINAL_STATUSES = (
     STATUS_DRY_RUN,
     STATUS_IGNORED,
 )
+
+def final_statuses(*, dry_run: bool) -> tuple[str, ...]:
+    """Statuses that count as finished in the current mode.
+
+    A DRY_RUN row means "classified but never written to Paperless", so once live
+    mode is on those documents stay eligible and get applied for real.
+    """
+    if dry_run:
+        return FINAL_STATUSES
+    return tuple(s for s in FINAL_STATUSES if s != STATUS_DRY_RUN)
 
 
 class Database:
@@ -188,6 +200,18 @@ class Database:
             """
         )
 
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        # Older databases already contain an empty key/value app_meta table.
+        self._add_column_if_missing("app_meta", "updated_at", "TEXT")
+
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_paperless_id ON documents (paperless_id)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_file_hash ON documents (file_hash)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_ocr_hash ON documents (ocr_hash)")
@@ -201,6 +225,24 @@ class Database:
         if row is None:
             return None
         return dict(row)
+
+    def get_meta(self, key: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT value FROM app_meta WHERE key = ?",
+            (key,),
+        ).fetchone()
+        return None if row is None else str(row["value"])
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO app_meta (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (key, value, self._now()),
+        )
+        self.conn.commit()
 
     def exists_hash(self, file_hash: str) -> bool:
         row = self.conn.execute(
@@ -265,8 +307,10 @@ class Database:
     def exists_paperless_id(
         self,
         paperless_id: int,
-        statuses: tuple[str, ...] = FINAL_STATUSES,
+        statuses: tuple[str, ...] | None = None,
     ) -> bool:
+        if statuses is None:
+            statuses = final_statuses(dry_run=settings.dry_run)
         placeholders = ", ".join("?" for _ in statuses)
         row = self.conn.execute(
             f"""

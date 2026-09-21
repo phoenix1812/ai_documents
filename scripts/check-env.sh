@@ -23,6 +23,7 @@ required_vars=(
   OLLAMA_MODEL
   REVIEW_UI_USERNAME
   REVIEW_UI_PASSWORD
+  DRY_RUN
 )
 
 for var in "${required_vars[@]}"; do
@@ -41,6 +42,27 @@ for var in QUEUE_MAX_ATTEMPTS QUEUE_RETRY_BASE_SECONDS QUEUE_RETRY_MAX_SECONDS R
   value="${!var:-}"
   [[ "$value" =~ ^[0-9]+$ ]] || fail "$var muss eine positive Ganzzahl sein"
 done
+
+case "${DRY_RUN}" in
+  true|false) ;;
+  *) fail "DRY_RUN muss true oder false sein (aktuell: '${DRY_RUN}')" ;;
+esac
+
+for var in RECONCILE_ENABLED RECONCILE_INITIAL_IMPORT; do
+  value="${!var:-}"
+  case "$value" in
+    ""|true|false) ;;
+    *) fail "$var muss true oder false sein (aktuell: '$value')" ;;
+  esac
+done
+
+if [ "${DRY_RUN}" = "false" ]; then
+  warn "DRY_RUN=false: der Worker schreibt Metadaten direkt nach Paperless."
+fi
+
+if [ "${RECONCILE_ENABLED:-true}" != "false" ] && [ "${RECONCILE_INITIAL_IMPORT:-false}" = "true" ]; then
+  warn "RECONCILE_INITIAL_IMPORT=true: der gesamte Paperless-Bestand wird automatisch eingelesen."
+fi
 
 # Network-backed consume directories need polling in Paperless v3.
 if [[ "${PAPERLESS_CONSUME_PATH:-}" == /Volumes/* ]] || [[ "${PAPERLESS_CONSUME_PATH:-}" == /mnt/* ]]; then

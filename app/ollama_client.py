@@ -21,10 +21,17 @@ from tenacity import wait_fixed
 
 from app.config import settings
 from app.models import ClassificationResult
+from app.prompts import RESPONSE_SCHEMA
 from app.prompts import SYSTEM_PROMPT
 from app.prompts import USER_PROMPT_TEMPLATE
 
 logger = logging.getLogger(__name__)
+
+# A 4B model tends to copy whole OCR sentences into tags. Paperless would
+# create a new tag for each of them, so the list is bounded before writing.
+MAX_TAGS = 8
+MAX_TAG_LENGTH = 40
+MAX_TAG_WORDS = 4
 
 
 KEYWORD_PATTERNS = (
@@ -145,8 +152,10 @@ def _as_tags(value: object) -> list[str]:
     seen: set[str] = set()
 
     for raw_tag in raw_tags:
-        tag = str(raw_tag).strip()
-        if not tag:
+        tag = " ".join(str(raw_tag).split())
+        if not tag or len(tag) > MAX_TAG_LENGTH:
+            continue
+        if len(tag.split()) > MAX_TAG_WORDS:
             continue
 
         key = tag.lower()
@@ -156,7 +165,7 @@ def _as_tags(value: object) -> list[str]:
         tags.append(tag)
         seen.add(key)
 
-    return tags
+    return tags[:MAX_TAGS]
 
 
 def _coerce_float(value: object, default: float = 0.5) -> float:
@@ -217,7 +226,7 @@ class OllamaClient:
                     "content": prompt,
                 },
             ],
-            format="json",
+            format=RESPONSE_SCHEMA,
             options={
                 "temperature": 0,
             },
@@ -233,6 +242,13 @@ class OllamaClient:
         except json.JSONDecodeError:
             logger.error("Invalid JSON from Ollama. Output length: %s", len(raw))
             raise
+
+        if not isinstance(data, dict) or not any(
+            value not in (None, "", [], {}) for value in data.values()
+        ):
+            # An empty answer would otherwise be stored as a plausible
+            # "Sonstiges/Unbekannt" review case instead of a model failure.
+            raise ValueError("Ollama returned an empty classification object")
 
         return ClassificationResult(
             document_type=str(data.get("document_type") or "Sonstiges").strip(),

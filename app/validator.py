@@ -9,23 +9,17 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import UTC
+from datetime import datetime
 
 from app.config import settings
 from app.models import ClassificationResult
+from app.prompts import DOCUMENT_TYPES
 
 
-ALLOWED_DOCUMENT_TYPES = {
-    "Rechnung",
-    "Vertrag",
-    "Versicherung",
-    "Steuer",
-    "Bank",
-    "Gehalt",
-    "Gesundheit",
-    "Energie",
-    "Brief",
-    "Sonstiges",
-}
+# Derived from the prompt taxonomy so the model cannot be asked for a value
+# the validator would then reject.
+ALLOWED_DOCUMENT_TYPES = set(DOCUMENT_TYPES)
 
 INVALID_PLACEHOLDER_VALUES = {
     "",
@@ -75,7 +69,10 @@ TECHNICAL_WORKFLOW_TAGS = {
     "manuell",
 }
 
-DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+DATE_RE = re.compile(r"^(?P<year>\d{4})-\d{2}-\d{2}$")
+# Documents from before 1990 are rare enough in a private archive that a year
+# in this range is more likely a hallucination than real metadata.
+MIN_PLAUSIBLE_YEAR = 1990
 AMOUNT_RE = re.compile(r"\d+[,.]?\d*\s?(EUR|€|Euro)?", re.IGNORECASE)
 
 
@@ -111,7 +108,15 @@ def _valid_iso_date(value: str | None) -> bool:
     if value is None:
         return True
 
-    return bool(DATE_RE.match(value.strip()))
+    match = DATE_RE.match(value.strip())
+    if not match:
+        return False
+
+    # Small models occasionally invent an impossible year (1999 for a 2026
+    # document). A date outside this range is a hallucination, not metadata.
+    year = int(match.group("year"))
+    current_year = datetime.now(UTC).year
+    return MIN_PLAUSIBLE_YEAR <= year <= current_year + 1
 
 
 def _valid_amount(value: str | None) -> bool:
@@ -134,7 +139,36 @@ def _has_any_identifier(result: ClassificationResult) -> bool:
     )
 
 
-def validate_classification(result: ClassificationResult) -> ValidationResult:
+def _correspondent_in_document_head(correspondent: str | None, document_head: str | None) -> bool:
+    """Check that the claimed sender is mentioned at the start of the document.
+
+    A 4B model happily names an authority from an impressum or regulatory
+    footer as the correspondent. The sender is in the letterhead, so a
+    distinctive word of it should appear near the beginning.
+    """
+
+    head = _normalize(document_head)
+    if not head:
+        return True
+
+    tokens = [
+        token
+        for token in re.split(r"[^0-9a-zA-ZäöüÄÖÜß]+", _normalize(correspondent))
+        if len(token) >= 5
+    ]
+    if not tokens:
+        return True
+
+    return any(
+        re.search(rf"(?<![0-9a-zäöüß]){re.escape(token)}(?![0-9a-zäöüß])", head)
+        for token in tokens
+    )
+
+
+def validate_classification(
+    result: ClassificationResult,
+    document_head: str | None = None,
+) -> ValidationResult:
     """Validate whether a classification result is safe for automatic processing.
 
     Documents are sent to review when:
@@ -143,6 +177,7 @@ def validate_classification(result: ClassificationResult) -> ValidationResult:
     - generated title is too short or generic
     - document_type is outside the taxonomy
     - technical workflow tags would be written to Paperless
+    - the correspondent is not mentioned at the start of the document
     - type-specific evidence is missing
     """
 
@@ -159,6 +194,9 @@ def validate_classification(result: ClassificationResult) -> ValidationResult:
 
     if _is_placeholder(result.correspondent):
         reasons.append("placeholder_correspondent")
+
+    if not _correspondent_in_document_head(result.correspondent, document_head):
+        reasons.append("correspondent_not_in_document_head")
 
     if _is_placeholder(result.title):
         reasons.append("placeholder_title")
