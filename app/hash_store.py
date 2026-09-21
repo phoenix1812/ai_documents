@@ -13,11 +13,13 @@ def sha256(data: bytes) -> str:
 
 
 def normalize_ocr_text(content: str) -> str:
-    """Normalize OCR text so visually identical scans produce similar hashes.
+    """Normalize OCR text so the same recognized text hashes identically.
 
-    The PDF hash catches exact binary duplicates. The OCR hash catches probable
-    duplicates where the PDF bytes differ but the recognized text is effectively
-    the same.
+    Both duplicate levels compare hashes for exact equality. The PDF hash
+    catches binary duplicates; the OCR hash catches documents whose PDF bytes
+    differ but whose normalized text is character-for-character the same. A
+    rescan of the same page produces different OCR text and is therefore not
+    detected.
     """
     text = unicodedata.normalize("NFKC", content or "")
     text = text.lower()

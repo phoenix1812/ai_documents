@@ -82,7 +82,8 @@ Verbotene technische Tags:
 
 Wichtige Hinweise:
 - Der finale Paperless-Titel wird serverseitig aus document_type,
-  correspondent, subject, document_date und amount gebaut.
+  correspondent, subject und document_date gebaut. amount gehört nicht in den
+  Titel, wird aber weiterhin extrahiert.
 - subject ist der wichtigste Titel-Bestandteil: höchstens 5 Wörter.
 - Für Rechnungen sind invoice_number, amount und document_date besonders wichtig.
 - Für Verträge sind contract_number, correspondent und subject besonders wichtig.

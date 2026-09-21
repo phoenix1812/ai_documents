@@ -321,6 +321,15 @@ sha256(PDF-Bytes)
 sha256(normalisierter OCR-Text)
 ```
 
+Beide Stufen vergleichen Hashes auf **exakte Gleichheit**, es gibt keine
+Aehnlichkeits- oder Unschaerfeprüfung. „Wahrscheinlich" heisst nur, dass die
+PDF-Bytes unterschiedlich sind, der normalisierte OCR-Text aber Zeiger fuer
+Zeiger identisch sein muss. Ein erneuter Scan desselben Blatts wird dadurch
+regelmaendig *nicht* als Duplikat erkannt: Scanner-OCR wiederholt Kopfzeilen
+und liest Randobjekte anders. Die Stufen 1 und 2 erkennen also Neu-Importe derselben Datei, nicht Neu-Scans.
+Gemessen am 2026-09-21 an einem iPad-PDF und seinem Scan: 964 vs. 1209 Zeichen,
+Aehnlichkeit 0.65, beide Hashes verschieden.
+
 Beim Reprocess wird das aktuelle Paperless-Dokument aus der Duplikatpruefung
 ausgeschlossen. Dadurch wird ein Dokument nicht faelschlich als Duplikat von
 sich selbst markiert.
@@ -330,13 +339,13 @@ sich selbst markiert.
 Der finale Titel wird serverseitig aus strukturierten Feldern gebaut:
 
 ```text
-Dokumenttyp_Korrespondent_Thema_Datum_Betrag
+Dokumenttyp_Korrespondent_Thema_Datum
 ```
 
 Beispiele:
 
 ```text
-Rechnung_Amazon_Bueromaterial_2026-05-12_84,99_EUR
+Rechnung_Amazon_Bueromaterial_2026-05-12
 Brief_Finanzamt_Steuerbescheid_2025
 Vertrag_Vodafone_Glasfaser
 Versicherung_Allianz_KFZ_2026
@@ -346,6 +355,9 @@ Regeln:
 
 - keine Leerzeichen
 - `_` als Trenner
+- kein Betrag: `amount` wird weiter extrahiert und in der Review-UI angezeigt,
+  steht aber bewusst nicht im Titel, weil Geldbeträge keinen aussagekräftigen
+  Dateinamen ergeben
 - keine `[Review]`-Praefixe
 - keine technischen Workflow-Informationen
 - maximale Laenge: 120 Zeichen

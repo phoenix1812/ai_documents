@@ -114,7 +114,10 @@ def clip_words(value: str, max_words: int, max_chars: int) -> str:
 
 
 def build_document_title(result: ClassificationResult) -> str:
-    """Build a deterministic Paperless title from structured fields."""
+    """Build a deterministic Paperless title from structured fields.
+
+    The amount is excluded on purpose: it belongs to the review data, not the file name.
+    """
     parts: list[str] = []
 
     if result.document_type:
@@ -125,8 +128,6 @@ def build_document_title(result: ClassificationResult) -> str:
         parts.append(clip_words(result.subject, 5, 45))
     if result.document_date:
         parts.append(result.document_date)
-    if result.amount:
-        parts.append(result.amount)
 
     cleaned_parts = []
     seen = set()
