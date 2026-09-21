@@ -89,7 +89,13 @@
                     Nach Paperless übernehmen
                 </label>
 
-                <button class="button success" type="submit">Speichern</button>
+                <div class="row-actions">
+                    <button class="button success" type="submit">Speichern</button>
+                    <button class="button secondary" type="submit" name="rebuild_title" value="true"
+                            title="Titel neu aus Dokumenttyp, Korrespondent, Thema und Datum bauen und speichern. Ein manuell getippter Titel bleibt erhalten, solange du diese Schaltfläche nicht benutzt.">
+                        Titel aus Feldern neu bauen
+                    </button>
+                </div>
             </form>
 
             {% if item.status in review_statuses %}

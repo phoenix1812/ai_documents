@@ -202,6 +202,8 @@ class Database:
             ("original_title", "TEXT"),
             ("ocr_excerpt", "TEXT"),
             ("paperless_url", "TEXT"),
+            ("subject", "TEXT"),
+            ("document_date", "TEXT"),
             ("retry_count", "INTEGER DEFAULT 0"),
             ("last_retry_at", "TEXT"),
         ):
@@ -370,6 +372,8 @@ class Database:
         ocr_hash: str | None = None,
         duplicate_of_paperless_id: int | None = None,
         duplicate_reason: str | None = None,
+        subject: str | None = None,
+        document_date: str | None = None,
     ) -> None:
         now = self._now()
         self.conn.execute(
@@ -383,6 +387,8 @@ class Database:
                 title,
                 correspondent,
                 document_type,
+                subject,
+                document_date,
                 tags,
                 confidence,
                 reason,
@@ -396,7 +402,7 @@ class Database:
                 created_at,
                 processed_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 COALESCE((SELECT retry_count FROM documents WHERE file_hash = ?), 0),
                 ?, ?)
             """,
@@ -409,6 +415,8 @@ class Database:
                 title,
                 correspondent,
                 document_type,
+                subject,
+                document_date,
                 self._json_list(tags),
                 confidence,
                 reason,

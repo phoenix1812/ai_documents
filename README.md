@@ -362,6 +362,13 @@ Regeln:
 - keine technischen Workflow-Informationen
 - maximale Laenge: 120 Zeichen
 
+`subject` und `document_date` speichert die Queue zusaetzlich in SQLite. Dafuer
+gibt es in der Review-UI die Schaltflaeche „Titel aus Feldern neu bauen": Sie
+ersetzt den Titel durch das Ergebnis dieser Regel. Ein manuell getippter Titel
+wird ohne Klick auf diese Schaltflaeche nie veroendert. Zeilen, die vor diesen
+beiden Spalten angelegt wurden, haben kein Thema und kein Datum gespeichert;
+ihr neu gebauter Titel enthaelt deshalb nur Dokumenttyp und Korrespondent.
+
 ## Konfiguration
 
 Wichtige Variablen:

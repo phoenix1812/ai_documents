@@ -147,6 +147,30 @@ def build_document_title(result: ClassificationResult) -> str:
     return title[:120]
 
 
+def rebuild_title_from_stored_fields(
+    *,
+    correspondent: str | None,
+    document_type: str | None,
+    subject: str | None,
+    document_date: str | None,
+    fallback_title: str | None,
+) -> str:
+    """Rebuild an existing title from the structured fields stored in SQLite.
+
+    Rows stored before subject/document_date existed only carry type and
+    correspondent, so their rebuilt title is shorter than an automatic one.
+    """
+    return build_document_title(
+        ClassificationResult(
+            document_type=(document_type or "").strip(),
+            correspondent=(correspondent or "").strip(),
+            title=(fallback_title or "").strip(),
+            subject=(subject or "").strip() or None,
+            document_date=(document_date or "").strip() or None,
+        )
+    )
+
+
 def clean_paperless_tags(tags: list[str] | None) -> list[str]:
     """Remove workflow tags before writing tags to Paperless."""
     cleaned_tags: list[str] = []
@@ -190,6 +214,8 @@ class DocumentClassifier:
         original_title: str | None,
         ocr_excerpt: str | None,
         paperless_url: str | None,
+        subject: str | None = None,
+        document_date: str | None = None,
     ) -> str:
         """Store review state in SQLite only.
 
@@ -202,6 +228,8 @@ class DocumentClassifier:
             title=title,
             correspondent=correspondent,
             document_type=document_type,
+            subject=subject,
+            document_date=document_date,
             tags=tags,
             confidence=confidence,
             reason=reason,
@@ -355,6 +383,8 @@ class DocumentClassifier:
                     original_title=original_title,
                     ocr_excerpt=ocr_excerpt,
                     paperless_url=paperless_url,
+                    subject=result.subject,
+                    document_date=result.document_date,
                 )
 
             if settings.dry_run:
@@ -365,6 +395,8 @@ class DocumentClassifier:
                     title=result.title,
                     correspondent=result.correspondent,
                     document_type=result.document_type,
+                    subject=result.subject,
+                    document_date=result.document_date,
                     tags=result.tags,
                     confidence=confidence,
                     reason=reason,
@@ -392,6 +424,8 @@ class DocumentClassifier:
                 title=result.title,
                 correspondent=result.correspondent,
                 document_type=result.document_type,
+                subject=result.subject,
+                document_date=result.document_date,
                 tags=result.tags,
                 confidence=confidence,
                 reason=reason,

@@ -21,6 +21,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from app.classifier import rebuild_title_from_stored_fields
 from app.config import settings
 from app.db import (
     APPROVED_STATUSES,
@@ -322,6 +323,7 @@ def save_document(
     tags: str = Form(""),
     apply_to_paperless: bool = Form(default=False),
     correction_reason: str = Form(default="Manuelle Korrektur"),
+    rebuild_title: bool = Form(default=False),
 ):
     db = get_db()
     item = get_item_or_404(item_id)
@@ -336,6 +338,17 @@ def save_document(
     clean_correspondent = correspondent.strip()
     clean_document_type = document_type.strip()
     tag_list = parse_tags(tags)
+
+    # Strict compare: approve() and direct calls omit the argument, which would
+    # otherwise pass FastAPI's Form default object and be truthy.
+    if rebuild_title is True:
+        clean_title = rebuild_title_from_stored_fields(
+            correspondent=clean_correspondent,
+            document_type=clean_document_type,
+            subject=item.get("subject"),
+            document_date=item.get("document_date"),
+            fallback_title=clean_title,
+        )
 
     if not clean_title:
         raise HTTPException(status_code=400, detail="Title must not be empty")
