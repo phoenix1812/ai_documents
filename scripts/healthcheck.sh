@@ -59,6 +59,37 @@ curl -fsS http://localhost:8000/ >/dev/null \
   || echo "❌ Paperless nicht erreichbar"
 
 echo
+echo "== Medien-Mount (Host vs. Container) =="
+# Docker Desktop kann einem AFP-Mount nicht in den Mountpoint folgen: Der Bind
+# existiert, ist aber leer, obwohl der Host Dateien sieht. Paperless antwortet
+# dann mit 404 beim Download, ohne dass ein Fehler im Code steckt.
+MEDIA_PATH="${PAPERLESS_MEDIA_PATH:-./paperless-media}"
+# Delete-Marker von SMB/AFP-Zaehlen nicht als Medien, sonst vergleicht man Muell.
+host_files="$(find "$MEDIA_PATH" -type f -not -name '.smbdelete*' -not -name '.afpDeleted*' 2>/dev/null | wc -l | tr -d ' ')"
+case "$MEDIA_PATH" in
+  /Volumes/*)
+    vol="/$(printf '%s' "$MEDIA_PATH" | cut -d/ -f2,3)"
+    fs_type="$(mount | awk -v v=" on $vol " 'index($0, v) { print $4; exit }' | tr -d '(,) ')"
+    [ -n "$fs_type" ] || fs_type="kein Mount unter $vol"
+    echo "Protokoll: $fs_type"
+    [ "$fs_type" = "afpfs" ] && echo "❌ AFP: Docker Desktop sieht den Inhalt nicht – auf SMB ummounten (smb://…)"
+    ;;
+  *)
+    fs_type="lokal"
+    ;;
+esac
+container_files="$(docker compose exec -T paperless sh -c \
+  "find /usr/src/paperless/media -type f -not -name '.smbdelete*' -not -name '.afpDeleted*' 2>/dev/null | wc -l | tr -d ' '" 2>/dev/null || echo '')"
+echo "Dateien: Host=$host_files Container=${container_files:-nicht ermittelbar}"
+if [ -z "$container_files" ]; then
+  echo "❌ Container nicht erreichbar für den Abgleich"
+elif [ "$host_files" != "$container_files" ]; then
+  echo "❌ Host und Container sehen unterschiedliche Medien – Mount defekt, nicht die Anwendung"
+else
+  echo "✅ Medien-Mount konsistent"
+fi
+
+echo
 echo "== Volumes/Pfade =="
 for path in \
   "${POSTGRES_DATA_PATH:-./data/postgres}" \

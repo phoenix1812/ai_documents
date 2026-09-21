@@ -517,6 +517,29 @@ Dockerfile-Bild gesetzt.
   -type f | wc -l`. Beide Zahlen muessen uebereinstimmen. Nach einem Wechsel des
   Protokolls reicht ein Neustart von Docker Desktop; `--force-recreate` allein
   hilft nicht.
+- Der SMB-Mount entsteht bei jeder Anmeldung durch ein LaunchAgent
+  (`~/Library/LaunchAgents/local.qoder.mount-nas-home.plist`, Skript
+  `~/Library/Application Support/nas-mount/mount-nas-home.sh`, Log
+  `~/Library/Logs/nas-mount.log`). Bewusst kein Eintrag unter „Anmeldeobjekte →
+  Beim Anmelden oeffnen": diese Liste war auf dem Rechner leer, und
+  `TALLogoutSavesState=false` schaltet Apples eigenes Wiederverbinden ab - das
+  ist der Grund, warum der alte Mount nach jedem Neustart fehlte. Das Skript
+  wartet auf Port 445 und mountet per `open "smb://…"`; ein eigenes `mkdir` unter
+  `/Volumes` scheitert ohne Root mit „Permission denied", der Finder legt den
+  Mountpoint dagegen selbst an. Verifiziert ist der Agent bis auf den Fall „Mount
+  fehlt nach dem Boot" (2026-09-21): der laeuft erst beim naechsten echten Login
+  los, ein vorheriger Manuelltest war nicht moeglich, ohne die laufende
+  Containersicht zu zerstoeren.
+- **Die Freigabe nicht neu mounten, waehrend Docker laeuft:** ein Remount der
+  SMB-Sitzung entwertet die beim Engine-Start aufgebauten File-Sharing-Views.
+  Beobachtet am 2026-09-21: Host sah 14 Dateien, der Container antwortete mit
+  `Operation not permitted`. Geholfen hat nur ein Neustart von Docker Desktop.
+  Reihenfolge ist also: mounten (macht das LaunchAgent), dann Docker starten.
+- `scripts/healthcheck.sh` meldet Protokoll und vergleicht die Dateizahl von Host
+  und Container; geloeschte Netzwerkdateien hinterlassen dabei
+  `.smbdelete*`/`.afpDeleted*`-Marker, die auf beiden Seiten ausgeblendet werden -
+  sonst vergleicht man Muell statt Medien. Bei „Host > 0, Container = 0" ist die
+  Freigabe schuld, nicht die Anwendung.
 - Geloeschte Dateien hinterlassen auf Netzwerkfreigaben Muell wie
   `.smbdelete*` und `.afpDeleted*`; `scripts/backup.sh` schliesst beide Muster aus.
 - Vor dem ersten echten Betrieb mit `DRY_RUN=true` testen und anschliessend ein
