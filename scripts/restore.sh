@@ -17,6 +17,7 @@ POSTGRES_USER="${POSTGRES_USER:-paperless}"
 PAPERLESS_DATA_PATH="${PAPERLESS_DATA_PATH:-./paperless-data}"
 PAPERLESS_MEDIA_PATH="${PAPERLESS_MEDIA_PATH:-./paperless-media}"
 AI_DATA_PATH="${AI_DATA_PATH:-./data}"
+POSTGRES_DATA_PATH="${POSTGRES_DATA_PATH:-./data/postgres}"
 RESTORE_TMP="./restore_tmp"
 
 echo "⚠️  Restore überschreibt lokale Daten."
@@ -50,16 +51,35 @@ restore_archive() {
   local archive="$1"
   local target="$2"
   local parent
+  shift 2
   parent="$(dirname "$target")"
   mkdir -p "$parent"
-  rm -rf "$target"
-  tar -xzf "$archive" -C "$parent"
+  clear_target "$target"
+  tar "$@" -xzf "$archive" -C "$parent"
+}
+
+# Netzwerk-Freigaben geben Geloeschte-Marker (.smbdelete*/.afpDeleted*) erst frei,
+# wenn der Client den Handle schliesst. Ein hartes `rm -rf` scheitert dort und
+# wuerde das Restore abbrechen - genau dann, wenn die lokalen Verzeichnisse schon
+# geloescht sind. Also: Inhalt loeschen, Marker ignorieren, Archiv darueber spielen.
+clear_target() {
+  local target="$1"
+  [ -e "$target" ] || return 0
+  rm -rf "$target" 2>/dev/null && return 0
+  echo "⚠️  $target bleibt teilweise stehen (Netzwerk-Mount): loesche Inhalt, ignoriere SMB/AFP-Marker."
+  find "$target" -mindepth 1 -maxdepth 1 \
+    ! -name '.smbdelete*' ! -name '.afpDeleted*' \
+    -exec rm -rf {} + 2>/dev/null || true
 }
 
 echo "➡️  Stelle Dateien wieder her"
 restore_archive "$BACKUP_DIR/paperless-data.tar.gz" "$PAPERLESS_DATA_PATH"
 restore_archive "$BACKUP_DIR/paperless-media.tar.gz" "$PAPERLESS_MEDIA_PATH"
-restore_archive "$BACKUP_DIR/ai-data.tar.gz" "$AI_DATA_PATH"
+# Alte Archive enthalten noch das PostgreSQL-Datenverzeichnis (AI_DATA_PATH ist
+# sein Elternordner). Ein nicht konsistenter Cluster darf nie zurueck ueber die
+# laufende Instanz geschrieben werden – die Daten kommen aus paperless.dump.
+restore_archive "$BACKUP_DIR/ai-data.tar.gz" "$AI_DATA_PATH" \
+  --exclude="$(basename "$AI_DATA_PATH")/$(basename "$POSTGRES_DATA_PATH")"
 
 echo "➡️  Starte PostgreSQL"
 docker compose up -d db

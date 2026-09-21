@@ -57,7 +57,9 @@ archive_dir() {
   local abs
   abs="$(cd "$(dirname "$source")" && pwd)/$(basename "$source")"
   [ -d "$abs" ] || { echo "❌ Backup-Quelle fehlt: $source"; exit 1; }
-  tar --exclude='.afpDeleted*' --exclude='@eaDir' --exclude='.DS_Store' \
+  shift 2
+  tar --exclude='.afpDeleted*' --exclude='.smbdelete*' --exclude='@eaDir' --exclude='.DS_Store' \
+    "$@" \
     -czf "$BACKUP_DIR/$target.tar.gz" \
     -C "$(dirname "$abs")" "$(basename "$abs")"
 }
@@ -67,7 +69,14 @@ archive_dir "$PAPERLESS_DATA_PATH" paperless-data
 archive_dir "$PAPERLESS_MEDIA_PATH" paperless-media
 
 echo "➡️  Sichere AI-SQLite-Daten"
-archive_dir "$AI_DATA_PATH" ai-data
+# AI_DATA_PATH ist in dieser Konfiguration der Elternordner des PostgreSQL-
+# Clusters (POSTGRES_DATA_PATH=./data/postgres). Ein Tar-Archiv eines laufenden
+# Clusters ist nicht konsistent - und ein Restore wuerde es zurueck ueber die
+# lebende Instanz schreiben. Deshalb bleibt der Cluster draussen.
+if [ "$(cd "$POSTGRES_DATA_PATH" 2>/dev/null && pwd)" = "$(cd "$AI_DATA_PATH" 2>/dev/null && pwd)/$(basename "$POSTGRES_DATA_PATH")" ]; then
+  echo "ℹ️  PostgreSQL-Daten liegen innerhalb von AI_DATA_PATH – werden aus dem AI-Archiv ausgeschlossen (sind bereits als paperless.dump gesichert)."
+fi
+archive_dir "$AI_DATA_PATH" ai-data --exclude="$(basename "$AI_DATA_PATH")/$(basename "$POSTGRES_DATA_PATH")"
 
 cat > "$BACKUP_DIR/manifest.txt" <<EOF
 Backup: $TIMESTAMP

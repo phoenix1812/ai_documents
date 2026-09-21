@@ -505,8 +505,34 @@ Dockerfile-Bild gesetzt.
   ID gegen SQLite. Ab einigen tausend Dokumenten ist das alle zehn Minuten spuerbar.
 - Das konfigurierte Ollama-Modell ist Bestandteil des Readiness-Checks.
 - Fuer NAS/SMB/NFS-Consume-Pfade wird Paperless v3 mit Polling betrieben.
+- **Netzwerk-Mounts fuer `PAPERLESS_MEDIA_PATH`/`PAPERLESS_DATA_PATH` nur per SMB,
+  nie per AFP.** Docker Desktop kann einem AFP-Mount nicht in den Mountpoint
+  folgen: Der Bind existiert im Container, zeigt aber ein leeres Verzeichnis,
+  obwohl der Host Dateien sieht. Paperless meldet dann 404 beim Download und
+  `HTTP 400 [Errno 17] File exists` beim Loeschen, ohne dass ein Fehler im Code
+  steckt. Zusaetzlich muss die Freigabe gemountet sein, *bevor* Docker Desktop
+  startet, weil die File-Sharing-Views beim Engine-Start aufgebaut werden.
+  Prüfen laesst sich das mit zwei Befehlen: `find /Volumes/.../media -type f | wc -l`
+  auf dem Host gegen `docker compose exec paperless find /usr/src/paperless/media
+  -type f | wc -l`. Beide Zahlen muessen uebereinstimmen. Nach einem Wechsel des
+  Protokolls reicht ein Neustart von Docker Desktop; `--force-recreate` allein
+  hilft nicht.
+- Geloeschte Dateien hinterlassen auf Netzwerkfreigaben Muell wie
+  `.smbdelete*` und `.afpDeleted*`; `scripts/backup.sh` schliesst beide Muster aus.
 - Vor dem ersten echten Betrieb mit `DRY_RUN=true` testen und anschliessend ein
-  Backup/Restore einmal erfolgreich durchspielen.
+  Backup/Restore einmal erfolgreich durchspielen. Getestet am 2026-09-21 mit
+  Markern in allen drei Speichern (Datei, SQLite, PostgreSQL): alle drei waren
+  nach dem Restore zurueckgerollt, Host- und Container-Sicht auf die Media-Freigabe
+  stimmten ueberein.
+- `AI_DATA_PATH` und `POSTGRES_DATA_PATH` liegen verschachtelt
+  (`./data` und `./data/postgres`). `scripts/backup.sh` haelt den laufenden Cluster
+  deshalb aus dem AI-Archiv raus (ein Tar eines laufenden Clusters ist inkonsistent)
+  und `scripts/restore.sh` schliesst ihn beim Auspacken zusaetzlich aus - die
+  PostgreSQL-Daten kommen ausschliesslich aus `paperless.dump`. Neue Setups sollten
+  die beiden Pfade trennen.
+- Restore ueber ein Netzwerk-Verzeichnis loescht nicht hart `rm -rf`: SMB/AFP halten
+  `.smbdelete*`/`.afpDeleted*`-Marker offen, bis der Client den Handle freigibt, und
+  ein Abbruch mitten im Restore waer schlechter als zurueckbleibender Muell.
 - Gespeicherte Review-Entscheidungen werden noch nicht automatisch in Prompts
   oder Regeln zurueckgespielt.
 - Die Umgebungsvariablen `EXPORT_PATH` und `POLL_INTERVAL` (und damit ein
