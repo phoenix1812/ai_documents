@@ -14,6 +14,7 @@ import requests
 
 from app.classifier import DocumentClassifier
 from app.config import settings
+from app.db import reprocessable_statuses
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,12 @@ class Worker:
     def process_once(self, document_id: int) -> str:
         self.wait_for_paperless()
 
-        if self.classifier.db.exists_paperless_id(document_id):
+        # Failures are not part of this set, otherwise the retry that the queue
+        # or the review UI scheduled would be swallowed as ALREADY_PROCESSED.
+        if self.classifier.db.exists_paperless_id(
+            document_id,
+            statuses=reprocessable_statuses(dry_run=settings.dry_run),
+        ):
             logger.info(
                 "Document %s already reached a final state. Skipping.",
                 document_id,

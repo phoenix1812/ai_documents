@@ -5,6 +5,35 @@ from app.queue_store import (
 )
 
 
+def test_queue_operations_close_their_connections(monkeypatch, tmp_path):
+    import sqlite3
+
+    import pytest
+
+    store = PersistentQueueStore(str(tmp_path))
+    opened = []
+    real_connect = store._connect
+
+    def spy():
+        conn = real_connect()
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(store, "_connect", spy)
+
+    store.enqueue(7)
+    store.claim_next()
+    store.mark_done(7)
+    store.status()
+
+    # "with conn" only commits, so a leaked connection here would mean one
+    # open file handle per queue operation for the life of the worker.
+    assert len(opened) >= 4
+    for conn in opened:
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")
+
+
 def test_queue_persists_and_recovers_processing_jobs(tmp_path):
     store = PersistentQueueStore(str(tmp_path))
     assert store.enqueue(123)["status"] == STATE_QUEUED

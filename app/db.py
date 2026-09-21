@@ -28,7 +28,6 @@ STATUS_MANUALLY_APPROVED = "MANUALLY_APPROVED"
 STATUS_FAILED = "FAILED"
 STATUS_FAILED_OCR = "FAILED_OCR"
 STATUS_FAILED_LLM = "FAILED_LLM"
-STATUS_FAILED_EXPORT = "FAILED_EXPORT"
 STATUS_FAILED_API = "FAILED_API"
 STATUS_NEEDS_REVIEW = "NEEDS_REVIEW"
 STATUS_REVIEW_REQUIRED = "REVIEW_REQUIRED"
@@ -36,13 +35,23 @@ STATUS_SKIPPED_DUPLICATE = "SKIPPED_DUPLICATE"
 STATUS_DRY_RUN = "DRY_RUN"
 STATUS_IGNORED = "IGNORED"
 
-FAILED_STATUSES = (
+# Failures that can disappear on their own because an external dependency was
+# unavailable. Only these are retried by the queue.
+TRANSIENT_FAILURE_STATUSES = (
     STATUS_FAILED,
-    STATUS_FAILED_OCR,
-    STATUS_FAILED_LLM,
-    STATUS_FAILED_EXPORT,
     STATUS_FAILED_API,
 )
+
+# Failures that are identical on every attempt: a document without a text
+# layer stays without one, and a model answer that cannot be parsed at
+# temperature 0 will not parse on retry. Re-queuing them only occupies the
+# single serial worker.
+DETERMINISTIC_FAILURE_STATUSES = (
+    STATUS_FAILED_OCR,
+    STATUS_FAILED_LLM,
+)
+
+FAILED_STATUSES = TRANSIENT_FAILURE_STATUSES + DETERMINISTIC_FAILURE_STATUSES
 
 REVIEW_STATUSES = (
     STATUS_NEEDS_REVIEW,
@@ -56,6 +65,11 @@ APPROVED_STATUSES = (
     STATUS_MANUALLY_APPROVED,
 )
 
+# Reconciliation only looks at this set. Failures belong here on purpose: the
+# queue already retried them within QUEUE_MAX_ATTEMPTS, and periodic
+# reconciliation must not resurrect an exhausted job forever, because a worker
+# blocked by one bad PDF stalls the whole serial pipeline. A human restarts a
+# failure from the review UI instead.
 FINAL_STATUSES = (
     STATUS_DONE,
     STATUS_AUTO_APPROVED,
@@ -65,7 +79,8 @@ FINAL_STATUSES = (
     STATUS_REVIEW_REQUIRED,
     STATUS_DRY_RUN,
     STATUS_IGNORED,
-)
+) + FAILED_STATUSES
+
 
 def final_statuses(*, dry_run: bool) -> tuple[str, ...]:
     """Statuses that count as finished in the current mode.
@@ -76,6 +91,19 @@ def final_statuses(*, dry_run: bool) -> tuple[str, ...]:
     if dry_run:
         return FINAL_STATUSES
     return tuple(s for s in FINAL_STATUSES if s != STATUS_DRY_RUN)
+
+
+def reprocessable_statuses(*, dry_run: bool) -> tuple[str, ...]:
+    """Final statuses that must not block a worker attempt.
+
+    Failures are deliberately excluded: the queue retries transient failures and
+    the review UI offers an explicit retry, so a FAILED_* row may not make the
+    second attempt return ALREADY_PROCESSED. Reconciliation keeps using
+    final_statuses(), where failures do count as finished.
+    """
+
+    failures = set(FAILED_STATUSES)
+    return tuple(s for s in final_statuses(dry_run=dry_run) if s not in failures)
 
 
 class Database:

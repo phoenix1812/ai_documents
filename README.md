@@ -129,7 +129,8 @@ RECONCILE_INITIAL_IMPORT=false
 
 `DRY_RUN` muss gesetzt und entweder `true` oder `false` sein; `scripts/check-env.sh`
 prueft das. `EXPORT_PATH` und `POLL_INTERVAL` in einer alten `.env` werden vom
-aktuellen Code nicht mehr gelesen.
+aktuellen Code nicht mehr gelesen und haben keine Entsprechung mehr in
+`app/config.py`.
 
 3. Umgebung pruefen:
 
@@ -273,24 +274,36 @@ werden. Review-Entscheidungen bleiben zusaetzlich in SQLite nachvollziehbar.
 | `REVIEW_REQUIRED` | In der Review-UI als klaerungsbeduerftig markiert |
 | `MANUALLY_APPROVED` | In der Review-UI manuell gespeichert/freigegeben |
 | `SKIPPED_DUPLICATE` | PDF- oder OCR-Duplikat erkannt |
-| `FAILED_OCR` | Kein OCR-Inhalt vorhanden |
-| `FAILED_LLM` | LLM-Antwort war nicht verarbeitbar |
-| `FAILED_API` | Paperless/Ollama/API-Aufruf fehlgeschlagen |
-| `FAILED` | Unerwarteter Fehler |
+| `FAILED_OCR` | Kein OCR-Inhalt vorhanden (endgueltig) |
+| `FAILED_LLM` | LLM-Antwort war nicht verarbeitbar (endgueltig) |
+| `FAILED_API` | Paperless/Ollama/API-Aufruf fehlgeschlagen (wiederholbar) |
+| `FAILED` | Unerwarteter Fehler (wiederholbar) |
 | `IGNORED` | Fehler wurde manuell ignoriert |
 
-`DONE` und `FAILED_EXPORT` sind als Statuswerte noch definiert und werden in der
-Review-UI mitgefuehrt, vom aktuellen Klassifikationspfad aber nicht geschrieben.
+`DONE` ist als Statuswert noch definiert und wird in der Review-UI mitgefuehrt,
+vom aktuellen Klassifikationspfad aber nicht geschrieben.
 
-Die Statusse `FAILED*` und `FAILED` gelten als wiederholbar: Die Queue versucht es
-mit Backoff erneut, bis `QUEUE_MAX_ATTEMPTS` erreicht ist (`DEAD`). Alle uebrigen
-Statusse gelten im jeweils aktiven Modus als endgueltig.
+Nur wiederholbare Fehler (`FAILED`, `FAILED_API`) laufen durch das Retry-System
+mit Backoff, bis `QUEUE_MAX_ATTEMPTS` erreicht ist und der Job `DEAD` wird.
+Endgueltige Fehler (`FAILED_OCR`, `FAILED_LLM`) bleiben sofort endgueltig: Ein
+dokument ohne Textschicht oder eine Antwort, die bei temperature 0 nicht zu
+parsen ist, wird auch im zehnten Versuch nicht besser, und die serielle Queue
+wuerde von einem einzigen kaputten PDF blockiert. Der Abgleich ueberspringt
+`DEAD`-Jobs, sonst wuerde jeder Zyklus dieselben Dokumente erneut einreihen.
+Ein Neustart ist bewusst dem Menschen vorbehalten (Retry in der Review-UI, der
+das Retry-Budget zuruecksetzt). Alle uebrigen Statusse gelten im jeweils aktiven
+Modus als endgueltig.
 
 ## Queue-Zustaende
 
 `processing_jobs` in SQLite kennt `QUEUED`, `PROCESSING`, `RETRY`, `DONE` und
 `DEAD`. `DONE` bedeutet hier "ein Versuch ist durchgelaufen" – der fachliche
 Status steht in der `documents`-Tabelle.
+
+Der Worker-Idempotenzschutz vergleicht den vorhandenen Row mit einer eigenen
+Statusmenge (`reprocessable_statuses`): Ein Fehler blockiert keinen geplanten
+Versuch, sonst wuerde jeder Retry sofort als `ALREADY_PROCESSED` enden. Der
+periodische Abgleich nutzt dagegen `final_statuses`, wo Fehler endgueltig sind.
 
 ## Duplikaterkennung
 
@@ -441,7 +454,6 @@ Dockerfile-Bild gesetzt.
 │   ├── reprocess.py          # Reprocess/Retry ueber denselben Queue-Trigger
 │   ├── review_ui.py          # FastAPI-Review-UI mit Basic-Auth
 │   ├── logging_config.py     # Logging-Setup
-│   ├── exporter.py           # aktueller Stand: von nichts importiert (Altlast)
 │   ├── static/
 │   └── templates/
 ├── scripts/
@@ -474,7 +486,10 @@ Dockerfile-Bild gesetzt.
 - Review-UI nicht oeffentlich ins Internet stellen, sie hoert auf `127.0.0.1:8090`
 - AI-Worker nur intern im Docker-Netz verwenden, er hat keinen publizierten Port
 - SQLite-Datenbank und Paperless-Daten regelmaessig sichern (`scripts/backup.sh`);
-  das Backup enthaelt die `.env` und damit Secrets – Aufbewahrung geschtzt
+  die `.env` ist standardmaessig **nicht** im Archiv, weil sie alle Secrets
+  enthaelt. Mit `INCLUDE_ENV_BACKUP=1 scripts/backup.sh` laesst sie sich
+  ausdruecklich ergaenzen – das Archiv dann wie einen Secret behandeln
+  (`scripts/restore.sh` spielt sie niemals zurueck ein)
 - Neue Setups zuerst mit `DRY_RUN=true` testen
 - LLM-Ergebnisse stichprobenartig ueber die Review-UI pruefen
 
@@ -494,5 +509,8 @@ Dockerfile-Bild gesetzt.
   Backup/Restore einmal erfolgreich durchspielen.
 - Gespeicherte Review-Entscheidungen werden noch nicht automatisch in Prompts
   oder Regeln zurueckgespielt.
-- `app/exporter.py` und die Umgebungsvariablen `EXPORT_PATH` und `POLL_INTERVAL`
-  sind Altlasten ohne Bezug zum aktuellen Codepfad.
+- Die Umgebungsvariablen `EXPORT_PATH` und `POLL_INTERVAL` (und damit ein
+  Export-Zweig aus frueheren Versionen) sind Altlasten ohne Bezug zum aktuellen
+  Codepfad; `app/exporter.py` wurde entfernt. Die Verzeichnisse `export/`,
+  `exports/` und `paperless-export/` koennen alte Artefakte enthalten und werden
+  vom Stack nicht mehr geschrieben.

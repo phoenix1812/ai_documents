@@ -65,10 +65,12 @@ class Reconciler:
     def reconcile_once(self) -> dict[str, int]:
         documents = self.paperless.get_documents()
         baseline = self._baseline_document_id(documents)
+        exhausted = self.processing_queue.exhausted_document_ids()
         queued = 0
         already_known = 0
         skipped = 0
         preexisting = 0
+        exhausted_skipped = 0
 
         for document in documents:
             document_id = int(document["id"])
@@ -77,8 +79,16 @@ class Reconciler:
                 preexisting += 1
                 continue
 
-            # Anything the current mode still considers unfinished is requeued:
-            # failures for recovery, and DRY_RUN rows once live mode is on.
+            # A job that already used all QUEUE_MAX_ATTEMPTS stays parked. It is
+            # revived only by an explicit retry in the review UI, never by the
+            # periodic pass, because each revival would cost the full retry
+            # budget again.
+            if document_id in exhausted:
+                exhausted_skipped += 1
+                continue
+
+            # The only row that legitimately becomes unfinished again is a
+            # DRY_RUN row once live mode is switched on.
             if self.db.exists_paperless_id(document_id):
                 already_known += 1
                 continue
@@ -91,12 +101,13 @@ class Reconciler:
 
         logger.info(
             "Reconciliation finished: Paperless=%s, queued=%s, known=%s, "
-            "skipped=%s, preexisting_ignored=%s.",
+            "skipped=%s, preexisting_ignored=%s, exhausted_ignored=%s.",
             len(documents),
             queued,
             already_known,
             skipped,
             preexisting,
+            exhausted_skipped,
         )
         return {
             "paperless_documents": len(documents),
@@ -104,6 +115,7 @@ class Reconciler:
             "already_known": already_known,
             "skipped": skipped,
             "preexisting_ignored": preexisting,
+            "exhausted_ignored": exhausted_skipped,
         }
 
     def _run(self) -> None:

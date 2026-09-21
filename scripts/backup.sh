@@ -27,7 +27,19 @@ done
 
 echo "📦 Erstelle Backup in: $BACKUP_DIR"
 cp docker-compose.yml "$BACKUP_DIR/docker-compose.yml"
-cp .env "$BACKUP_DIR/env.backup"
+
+# .env contains every secret of the stack (API token, DB and Review UI
+# passwords). Backup archives usually leave the host, so copying it is opt-in.
+ENV_IN_BACKUP=no
+if [ "${INCLUDE_ENV_BACKUP:-0}" = "1" ]; then
+  cp .env "$BACKUP_DIR/env.backup"
+  chmod 600 "$BACKUP_DIR/env.backup"
+  ENV_IN_BACKUP=yes
+  echo "⚠️  .env wurde kopiert: Dieses Archiv enthaelt alle Secrets!"
+elif [ -f ".env.example" ]; then
+  cp .env.example "$BACKUP_DIR/env.template"
+fi
+
 cp -r scripts "$BACKUP_DIR/scripts"
 
 echo "➡️  Sichere PostgreSQL"
@@ -66,9 +78,11 @@ Paperless media: $PAPERLESS_MEDIA_PATH
 AI data: $AI_DATA_PATH
 Paperless image: ${PAPERLESS_IMAGE:-ghcr.io/paperless-ngx/paperless-ngx:3.1.3}
 Ollama image: ${OLLAMA_IMAGE:-ollama/ollama:0.34.0}
+Secrets (.env) enthalten: $ENV_IN_BACKUP
 EOF
 
 tar -czf "${BACKUP_DIR}.tar.gz" -C "$BACKUP_ROOT" "ai_documents_${TIMESTAMP}"
+chmod 600 "${BACKUP_DIR}.tar.gz"
 rm -rf "$BACKUP_DIR"
 
 echo "✅ Backup fertig: ${BACKUP_DIR}.tar.gz"

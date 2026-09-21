@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from typing import Iterator
 
 
 STATE_QUEUED = "QUEUED"
@@ -43,8 +45,23 @@ class PersistentQueueStore:
         conn.execute("PRAGMA synchronous=NORMAL")
         return conn
 
+    @contextmanager
+    def _session(self) -> Iterator[sqlite3.Connection]:
+        """Transactional connection that is actually closed again.
+
+        ``with conn:`` only commits or rolls back, so using it alone leaked one
+        connection per queue operation for the lifetime of the worker.
+        """
+
+        conn = self._connect()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
     def _init_db(self, *, recover_processing: bool = False) -> None:
-        with self._connect() as conn:
+        with self._session() as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS processing_jobs (
@@ -81,7 +98,7 @@ class PersistentQueueStore:
             raise ValueError("document_id must be greater than 0")
 
         now = self._now()
-        with self._lock, self._connect() as conn:
+        with self._lock, self._session() as conn:
             row = conn.execute(
                 "SELECT * FROM processing_jobs WHERE document_id = ?",
                 (document_id,),
@@ -139,7 +156,7 @@ class PersistentQueueStore:
 
     def claim_next(self) -> int | None:
         now = self._now()
-        with self._lock, self._connect() as conn:
+        with self._lock, self._session() as conn:
             row = conn.execute(
                 """
                 SELECT document_id
@@ -179,7 +196,7 @@ class PersistentQueueStore:
             return document_id
 
     def mark_done(self, document_id: int) -> None:
-        with self._connect() as conn:
+        with self._session() as conn:
             conn.execute(
                 """
                 UPDATE processing_jobs
@@ -199,7 +216,7 @@ class PersistentQueueStore:
         max_delay_seconds: int,
     ) -> bool:
         now = self._now()
-        with self._connect() as conn:
+        with self._session() as conn:
             row = conn.execute(
                 "SELECT attempts FROM processing_jobs WHERE document_id = ?",
                 (document_id,),
@@ -244,7 +261,7 @@ class PersistentQueueStore:
             return True
 
     def mark_dead(self, document_id: int, error: str) -> None:
-        with self._connect() as conn:
+        with self._session() as conn:
             conn.execute(
                 """
                 UPDATE processing_jobs
@@ -256,7 +273,7 @@ class PersistentQueueStore:
             conn.commit()
 
     def recover_processing(self) -> int:
-        with self._connect() as conn:
+        with self._session() as conn:
             cursor = conn.execute(
                 """
                 UPDATE processing_jobs
@@ -269,7 +286,7 @@ class PersistentQueueStore:
             return int(cursor.rowcount)
 
     def status(self) -> dict[str, Any]:
-        with self._connect() as conn:
+        with self._session() as conn:
             rows = conn.execute(
                 "SELECT state, COUNT(*) AS count FROM processing_jobs GROUP BY state"
             ).fetchall()
@@ -297,7 +314,7 @@ class PersistentQueueStore:
             }
 
     def list_recoverable(self, limit: int = 100) -> list[int]:
-        with self._connect() as conn:
+        with self._session() as conn:
             rows = conn.execute(
                 """
                 SELECT document_id
@@ -310,7 +327,17 @@ class PersistentQueueStore:
             ).fetchall()
             return [int(row["document_id"]) for row in rows]
 
+    def exhausted_document_ids(self) -> set[int]:
+        """Documents whose job gave up after QUEUE_MAX_ATTEMPTS."""
+
+        with self._session() as conn:
+            rows = conn.execute(
+                "SELECT document_id FROM processing_jobs WHERE state = ?",
+                (STATE_DEAD,),
+            ).fetchall()
+            return {int(row["document_id"]) for row in rows}
+
     def integrity_check(self) -> str:
-        with self._connect() as conn:
+        with self._session() as conn:
             row = conn.execute("PRAGMA integrity_check").fetchone()
             return str(row[0]) if row else "unknown"

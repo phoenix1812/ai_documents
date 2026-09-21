@@ -2,7 +2,12 @@ from types import SimpleNamespace
 
 from app import reconciler as reconciler_module
 from app.config import settings
-from app.db import STATUS_AUTO_APPROVED, STATUS_DRY_RUN, Database
+from app.db import STATUS_AUTO_APPROVED
+from app.db import STATUS_DRY_RUN
+from app.db import STATUS_FAILED_API
+from app.db import STATUS_FAILED_LLM
+from app.db import STATUS_FAILED_OCR
+from app.db import Database
 from app.reconciler import BASELINE_META_KEY, Reconciler
 
 
@@ -15,18 +20,22 @@ class FakePaperless:
 
 
 class FakeQueue:
-    def __init__(self):
+    def __init__(self, exhausted=()):
         self.enqueued = []
+        self.exhausted = set(exhausted)
 
     def enqueue(self, document_id):
         self.enqueued.append(document_id)
         return SimpleNamespace(queued=True)
 
+    def exhausted_document_ids(self):
+        return self.exhausted
 
-def make_reconciler(monkeypatch, tmp_path, documents):
+
+def make_reconciler(monkeypatch, tmp_path, documents, exhausted=()):
     monkeypatch.setattr(reconciler_module, "PaperlessClient", lambda: FakePaperless(documents))
     monkeypatch.setattr(reconciler_module, "Database", lambda path: Database(str(tmp_path)))
-    queue = FakeQueue()
+    queue = FakeQueue(exhausted)
     return Reconciler(queue), queue
 
 
@@ -60,6 +69,42 @@ def test_initial_import_flag_allows_full_backfill(monkeypatch, tmp_path):
 
     assert queue.enqueued == [7, 8]
     assert reconciler.db.get_meta(BASELINE_META_KEY) is None
+
+
+def test_exhausted_jobs_are_not_revived(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "reconcile_initial_import", True)
+    reconciler, queue = make_reconciler(
+        monkeypatch, tmp_path, [{"id": 20}, {"id": 21}], exhausted={20}
+    )
+
+    result = reconciler.reconcile_once()
+
+    # Requeuing a DEAD job resets its attempt counter, so doing it on every
+    # pass would restart the full retry budget forever.
+    assert queue.enqueued == [21]
+    assert result["exhausted_ignored"] == 1
+
+
+def test_failures_are_final_for_reconciliation(tmp_path):
+    db = Database(str(tmp_path))
+
+    for paperless_id, status in (
+        (30, STATUS_FAILED_OCR),
+        (31, STATUS_FAILED_LLM),
+        (32, STATUS_FAILED_API),
+    ):
+        db.insert_document(
+            paperless_id=paperless_id,
+            file_hash=f"hash-{paperless_id}",
+            title="",
+            correspondent="",
+            document_type="",
+            export_path="",
+            status=status,
+        )
+
+    for paperless_id in (30, 31, 32):
+        assert db.exists_paperless_id(paperless_id) is True
 
 
 def test_reconcile_disabled_does_not_start_thread(monkeypatch, tmp_path):

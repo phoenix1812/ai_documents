@@ -35,6 +35,14 @@ for file in paperless.dump paperless-data.tar.gz paperless-media.tar.gz ai-data.
   [ -f "$BACKUP_DIR/$file" ] || { echo "❌ Backup unvollständig: $file fehlt"; exit 1; }
 done
 
+# .env is deliberately not part of a default backup, and never overwritten by a
+# restore: the local secrets are the ones this machine is supposed to use.
+if [ -f "$BACKUP_DIR/env.backup" ]; then
+  echo "ℹ️  Archiv enthält env.backup (Secrets). Restore überschreibt die lokale .env nicht."
+elif [ -f "$BACKUP_DIR/env.template" ]; then
+  echo "ℹ️  Archiv enthält nur env.template ohne Secrets – lokale .env wird weiterverwendet."
+fi
+
 echo "➡️  Stoppe Dienste"
 docker compose down
 

@@ -7,18 +7,9 @@ JSON answer, sentence-sized tags, and impossible dates.
 from __future__ import annotations
 
 import json
-import sys
-import types
 from types import SimpleNamespace
 
 import pytest
-
-# The repository keeps the Ollama model store in ./ollama, which shadows the
-# installed package when tests run outside the container.
-if not hasattr(sys.modules.get("ollama", None), "Client"):
-    _ollama_stub = types.ModuleType("ollama")
-    _ollama_stub.Client = object  # type: ignore[attr-defined]
-    sys.modules["ollama"] = _ollama_stub
 
 import app.ollama_client as ollama_module
 from app.classifier import clip_words

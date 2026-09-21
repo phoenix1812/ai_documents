@@ -8,18 +8,16 @@ import time
 from dataclasses import dataclass
 
 from app.config import settings
+from app.db import TRANSIENT_FAILURE_STATUSES
 from app.queue_store import PersistentQueueStore
 from app.worker import Worker
 
 logger = logging.getLogger(__name__)
 
-RETRY_STATUSES = {
-    "FAILED",
-    "FAILED_OCR",
-    "FAILED_LLM",
-    "FAILED_EXPORT",
-    "FAILED_API",
-}
+# Deterministic failures (no OCR text, unparsable model answer) are terminal:
+# repeating them would occupy the single worker for up to
+# QUEUE_MAX_ATTEMPTS x the Ollama retry count without any chance of success.
+RETRY_STATUSES = set(TRANSIENT_FAILURE_STATUSES)
 
 
 @dataclass(frozen=True)
@@ -59,6 +57,9 @@ class DocumentProcessingQueue:
             status=str(result["status"]),
             queue_size=int(status["queued"]) + int(status["retry"]),
         )
+
+    def exhausted_document_ids(self) -> set[int]:
+        return self.store.exhausted_document_ids()
 
     def snapshot(self) -> dict:
         status = self.store.status()
