@@ -730,8 +730,11 @@ class Database:
             ),
         }
 
-    def tag_kernel(self, correspondent: str | None, document_type: str | None) -> list[str] | None:
-        """Return the tag set he approved for this sender and document type.
+    def tag_kernel(
+        self, correspondent: str | None, document_type: str | None
+    ) -> tuple[list[str], int] | None:
+        """Return the tag set he approved for this sender and document type and
+        how many of his documents carry it.
 
         A key with exactly one approved set is a rule he already made. Several
         sets are an open question, so they are returned as None instead of being
@@ -753,7 +756,7 @@ class Database:
         ).fetchall():
             latest[int(row["paperless_id"])] = row
 
-        approved: set[tuple[str, ...]] = set()
+        approved: list[tuple[str, ...]] = []
         for row in latest.values():
             key = (
                 normalize_name(row["final_correspondent"]),
@@ -763,11 +766,12 @@ class Database:
                 continue
             tags = self.parse_json_list(row["final_tags"])
             if tags:
-                approved.add(tuple(sorted(tags, key=str.casefold)))
+                approved.append(tuple(sorted(tags, key=str.casefold)))
 
-        if len(approved) != 1:
+        distinct = set(approved)
+        if len(distinct) != 1:
             return None
-        return list(approved.pop())
+        return list(distinct.pop()), len(approved)
 
     def integrity_check(self) -> str:
         row = self.conn.execute("PRAGMA integrity_check").fetchone()

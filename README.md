@@ -431,16 +431,23 @@ weil ein 4B-Modell sie auch nach dem Prompt-Fix nicht zuverlaessig selbst trifft
   eine Tag-Menge freigegeben, ersetzt der Worker die Antwort des Modells dadurch
   (`app/classifier.py`, vor dem Titelbau). Zwei verschiedene Mengen sind keine
   Regel sondern eine offene Frage und werden weder gemittelt noch geraten - dann
-  entscheidet weiterhin das Modell. Weichen die Modell-Tags vom Kern ab, geht das
-  Dokument trotz hoher Konfidenz in die Review statt automatisch durch. Ein Tag,
+  entscheidet weiterhin das Modell. `tag_kernel` liefert zusaetzlich, wie viele
+  deiner Dokumente die Menge tragen: ab zwei Belegen (`KERNEL_AUTO_SUPPORT`,
+  `app/classifier.py`) geht das Dokument mit dem Kern automatisch durch, bei einem
+  einzelnen Beleg bleibt eine Abweichung ein Review - eine Freigabe kann die
+  Eigenart genau dieses Dokuments sein (pid 52 gegen pid 54). Ein Tag,
   das Paperless nicht kennt und das nie von dir freigegeben wurde, legt der Worker
   gar nicht erst an (`unknown_tag_names`, `app/paperless_client.py`); solche
   Dokumente landen bei dir. Die Review-UI darf weiterhin Tags anlegen, denn dort
   ist es dein Klick.
 
-  Auf dem echten Bestand haben 10 von 13 Schluesseln einen Kern. Kernlos sind
-  `Finanzamt Erkelenz / Steuer`, `Mann Gebaeudetechnik GmbH / Rechnung` und
-  `BKK EUREGIO / Versicherung` - genau die drei mit mehreren freigegebenen Mengen.
+  Auf dem echten Bestand (61 Dokumente, Stand 2026-09-22) haben 13 Schluessel
+  einen Kern und decken damit 34 Dokumente. Automatisch anwendbar sind davon 3
+  Schluessel mit je zwei oder mehr Belegen: `Stadt Hückelhoven / Steuer` (12
+  Dokumente), `Kreiswasserwerk Heinsberg GmbH / Rechnung` (9) und `NEW Netz GmbH /
+  Rechnung` (2) - zusammen 23 Dokumente. Grosste Kernlosen sind `Finanzamt
+  Erkelenz / Steuer` (15 Dokumente, zwei freigegebene Mengen) und `Mann
+  Gebaeudetechnik GmbH / Rechnung` (8, ebenfalls mehrere Mengen).
 
 Die Review-UI macht den Rest sichtbar: `/learning` gruppiert die Historie nach
 `KI-Typ -> korrigierter Typ` und `KI-Absender -> korrigierter Absender` statt nur

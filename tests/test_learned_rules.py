@@ -480,7 +480,7 @@ def _classifier(tmp_path, monkeypatch, *, tags, unknown_tags=(), confidence=0.98
 
 def _stored(classifier, paperless_id):
     return classifier.db.conn.execute(
-        "SELECT status, tags, error_message FROM documents WHERE paperless_id = ?",
+        "SELECT status, tags, reason, error_message FROM documents WHERE paperless_id = ?",
         (paperless_id,),
     ).fetchone()
 
@@ -495,11 +495,10 @@ def test_the_kernel_is_the_one_set_he_approved(tmp_path) -> None:
         tags=["Grundsteuer", "Nebenkosten", "Grundstück"],
     )
 
-    assert db.tag_kernel("STADT HÜCKELHOVEN", "steuer") == [
-        "Grundsteuer",
-        "Grundstück",
-        "Nebenkosten",
-    ]
+    assert db.tag_kernel("STADT HÜCKELHOVEN", "steuer") == (
+        ["Grundsteuer", "Grundstück", "Nebenkosten"],
+        1,
+    )
 
 
 def test_a_key_with_two_approved_sets_is_no_rule(tmp_path) -> None:
@@ -519,7 +518,19 @@ def test_only_the_last_decision_per_document_counts(tmp_path) -> None:
     _approved(db, paperless_id=52, correspondent="Stadt Hückelhoven",
               document_type="Steuer", tags=["Grundsteuer", "Nebenkosten"])
 
-    assert db.tag_kernel("Stadt Hückelhoven", "Steuer") == ["Grundsteuer", "Nebenkosten"]
+    assert db.tag_kernel("Stadt Hückelhoven", "Steuer") == (["Grundsteuer", "Nebenkosten"], 1)
+
+
+def test_the_kernel_counts_every_document_behind_it(tmp_path) -> None:
+    """Two documents carrying the same set make it a rule, one is a hint."""
+
+    db = Database(str(tmp_path))
+    _approved(db, paperless_id=52, correspondent="Stadt Hückelhoven",
+              document_type="Steuer", tags=["Grundsteuer", "Nebenkosten"])
+    _approved(db, paperless_id=53, correspondent="STADT HÜCKELHOVEN",
+              document_type="steuer", tags=["Nebenkosten", "Grundsteuer"])
+
+    assert db.tag_kernel("Stadt Hückelhoven", "Steuer") == (["Grundsteuer", "Nebenkosten"], 2)
 
 
 def test_an_unknown_key_has_no_kernel(tmp_path) -> None:
@@ -539,6 +550,25 @@ def test_a_second_groundsteuer_bescheid_gets_the_same_tags(tmp_path, monkeypatch
     assert json.loads(row["tags"]) == ["Grundsteuer", "Grundstück", "Nebenkosten"]
     assert "freigegeben hast" in row["error_message"]
     assert applied == {}
+
+
+def test_a_kernel_he_confirmed_twice_applies_without_asking(tmp_path, monkeypatch) -> None:
+    """The deviation itself is not a question any more: the tags written to
+    Paperless are his own, so only a single-support kernel still asks."""
+
+    classifier, applied = _classifier(tmp_path, monkeypatch, tags=["Grundsteuer", "Zähler"])
+    for paperless_id in (52, 53):
+        _approved(classifier.db, paperless_id=paperless_id,
+                  correspondent="Stadt Hückelhoven", document_type="Steuer",
+                  tags=["Grundsteuer", "Nebenkosten", "Grundstück"])
+
+    assert classifier.process_document(document_id=57) == STATUS_AUTO_APPROVED
+
+    assert applied["tags"] == ["Grundsteuer", "Grundstück", "Nebenkosten"]
+    row = _stored(classifier, 57)
+    assert json.loads(row["tags"]) == ["Grundsteuer", "Grundstück", "Nebenkosten"]
+    assert "Regel: Kern-Tags uebernommen" in row["reason"]
+    assert row["error_message"] != "Tag rule needs the operator"
 
 
 def test_a_tag_paperless_does_not_know_is_not_created_silently(tmp_path, monkeypatch) -> None:

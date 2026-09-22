@@ -33,6 +33,11 @@ from app.validator import validate_classification
 
 logger = logging.getLogger(__name__)
 
+# A tag kernel he confirmed on this many documents applies without asking. Below
+# that it still goes to review: one approval can be that single document's
+# peculiarity rather than a rule for the sender.
+KERNEL_AUTO_SUPPORT = 2
+
 TECHNICAL_WORKFLOW_TAGS = {
     "review",
     "ai-review",
@@ -417,7 +422,9 @@ class DocumentClassifier:
                 {tag.strip() for tag in result.tags if tag.strip()},
                 key=str.casefold,
             )
-            kernel_tags = self.db.tag_kernel(result.correspondent, result.document_type)
+            kernel = self.db.tag_kernel(result.correspondent, result.document_type)
+            kernel_tags = list(kernel[0]) if kernel else None
+            kernel_support = kernel[1] if kernel else 0
             tag_deviation = bool(kernel_tags) and kernel_tags != proposed_tags
             unknown_tags = [] if kernel_tags else self.paperless.unknown_tag_names(proposed_tags)
             if kernel_tags:
@@ -458,11 +465,21 @@ class DocumentClassifier:
 
             tag_reasons: list[str] = []
             if tag_deviation:
-                tag_reasons.append(
-                    "Die KI-Tags passen nicht zu dem, was du fuer diesen Absender und "
-                    "Dokumenttyp freigegeben hast: " + ", ".join(kernel_tags)
-                )
                 reason = f"{reason} | Regel: Kern-Tags uebernommen".strip(" |")
+                if kernel_support >= KERNEL_AUTO_SUPPORT:
+                    logger.info(
+                        "Kernel tags applied to document %s without asking: he has "
+                        "approved this set on %d documents.",
+                        document_id,
+                        kernel_support,
+                    )
+                else:
+                    tag_reasons.append(
+                        "Die KI-Tags passen nicht zu dem, was du fuer diesen Absender und "
+                        "Dokumenttyp freigegeben hast: "
+                        + ", ".join(kernel_tags)
+                        + " (bisher auf einem Dokument bestaetigt)"
+                    )
             if unknown_tags:
                 tag_reasons.append(
                     "Paperless kennt diese Tags nicht, und sie stammen nicht von dir: "
