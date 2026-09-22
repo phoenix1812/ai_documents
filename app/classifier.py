@@ -429,6 +429,26 @@ class DocumentClassifier:
                 )
                 result.correspondent = listed
 
+            # A sender he already has, written the way the OCR happened to look on
+            # this one scan, is the same three problems one field down: the title,
+            # the kernel key and the correspondent record. Only asked when the
+            # lookup above did not already hand over a name from his list.
+            established = (
+                None
+                if sender_rule
+                else self.paperless.resolve_correspondent_name(result.correspondent)
+            )
+            name_rule = bool(established) and established != result.correspondent
+            if name_rule:
+                logger.info(
+                    "Correspondent name resolved for document %s: %s instead of the "
+                    "model's %s.",
+                    document_id,
+                    established,
+                    result.correspondent,
+                )
+                result.correspondent = established
+
             # Before the title is built: the correspondent is a title component.
             result.correspondent = to_display_case(result.correspondent)
             applied_rule = apply_tax_authority_type_rule(result)
@@ -466,6 +486,9 @@ class DocumentClassifier:
                     f"{reason} | Regel: Absender aus deinem Bestand, "
                     "er steht im Text"
                 ).strip(" |")
+
+            if name_rule:
+                reason = f"{reason} | Regel: Schreibweise aus deinem Bestand".strip(" |")
 
             if not validation.valid:
                 return self._store_review(

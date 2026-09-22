@@ -95,7 +95,10 @@ class DocumentProcessingQueue:
 
             try:
                 logger.info("Processing queued document %s.", document_id)
-                result = self.worker.process_once(document_id=document_id)
+                result = self.worker.process_once(
+                    document_id=document_id,
+                    force=self.store.is_forced(document_id),
+                )
                 logger.info("Document %s finished with status %s.", document_id, result)
 
                 if result in RETRY_STATUSES:

@@ -76,3 +76,69 @@ def test_retry_moves_to_dead_after_max_attempts(tmp_path):
     assert store.claim_next() == 123
     assert store.mark_retry(123, "boom", 1, 1, 1) is False
     assert store.status()["dead"] == 1
+
+
+def test_a_forced_job_reaches_the_worker_with_the_order_still_set(tmp_path):
+    """The final-status check happens in the worker, not here, so the order has
+    to survive the queue hop from the claim to the attempt."""
+
+    store = PersistentQueueStore(str(tmp_path))
+    store.enqueue(123, force=True)
+    assert store.claim_next() == 123
+    assert store.is_forced(123) is True
+
+    store.mark_done(123)
+    assert store.is_forced(123) is False
+
+
+def test_an_ordinary_enqueue_carries_no_force(tmp_path):
+    store = PersistentQueueStore(str(tmp_path))
+    store.enqueue(123)
+    assert store.claim_next() == 123
+    assert store.is_forced(123) is False
+
+
+def test_a_retry_after_a_forced_attempt_is_not_forced_again(tmp_path):
+    """The rerun order is spent with the attempt. Its own retry needs no force:
+    a failure is not a final status."""
+
+    store = PersistentQueueStore(str(tmp_path))
+    store.enqueue(123, force=True)
+    assert store.claim_next() == 123
+    assert store.mark_retry(123, "temporary", 10, 1, 10) is True
+    assert store.is_forced(123) is False
+
+
+def test_a_queue_from_before_the_force_column_stays_usable(tmp_path):
+    """The deployed database has no force column yet, so startup has to add it
+    instead of failing on the first INSERT that names the column."""
+
+    import sqlite3
+
+    db_file = tmp_path / "documents.db"
+    conn = sqlite3.connect(db_file)
+    conn.execute(
+        """
+        CREATE TABLE processing_jobs (
+            document_id INTEGER PRIMARY KEY,
+            state TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            next_attempt_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO processing_jobs (document_id, state, created_at, updated_at) "
+        "VALUES (123, 'DONE', '2026-09-22T00:00:00+00:00', '2026-09-22T00:00:00+00:00')"
+    )
+    conn.commit()
+    conn.close()
+
+    store = PersistentQueueStore(str(tmp_path))
+    assert store.is_forced(123) is False
+    assert store.enqueue(123, force=True)["queued"] is True
+    assert store.claim_next() == 123
+    assert store.is_forced(123) is True

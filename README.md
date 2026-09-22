@@ -215,6 +215,18 @@ docker compose exec paperless curl -fsS \
   -d '{"document_id": 123}'
 ```
 
+Ein abgeschlossen verarbeitetes Dokument erneut durch den Worker schicken
+(`force=true` umgeht den Idempotenzschutz, die Werte in Paperless werden dabei
+ueberschrieben):
+
+```bash
+docker compose exec paperless curl -fsS \
+  -X POST 'http://ai-worker:8080/process?document_id=123&force=true'
+```
+
+Das „Manuell neu verarbeiten"-Formular der Review-UI setzt dieses Flag selbst,
+ein Retry aus der Fehlerliste nicht.
+
 Beispielantwort:
 
 ```json
@@ -304,6 +316,12 @@ Der Worker-Idempotenzschutz vergleicht den vorhandenen Row mit einer eigenen
 Statusmenge (`reprocessable_statuses`): Ein Fehler blockiert keinen geplanten
 Versuch, sonst wuerde jeder Retry sofort als `ALREADY_PROCESSED` enden. Der
 periodische Abgleich nutzt dagegen `final_statuses`, wo Fehler endgueltig sind.
+
+Zu jeder Zeile gehoert ein `force`-Flag. Es reist mit dem Auftrag von der Queue
+zum Worker (`is_forced`) und sagt dort: Dieser Versuch soll laufen, auch wenn der
+fachliche Status laengst abgeschlossen ist. Nach `DONE`, `RETRY` und `DEAD` ist
+der Auftrag verbraucht und das Flag zurueckgesetzt – ein Retry braucht kein
+force, weil eine Fehlerzeile ohnehin erneut verarbeitet wird.
 
 ## Duplikaterkennung
 
@@ -404,14 +422,24 @@ weil ein 4B-Modell sie auch nach dem Prompt-Fix nicht zuverlaessig selbst trifft
   ist; die Anwendung steht zusaetzlich im Feld `reason` der Zeile. Absichtlich nur
   aufs Finanzamt: Stadt und Kreis verschicken auch Gebuehrenrechnungen, deren
   Fall liegt deshalb nur als Prompt-Hinweis (`app/prompts.py`) vor.
-- **Kanonischer Korrespondent** (`resolve_existing_name`, `app/paperless_client.py`).
-  Jede neue Schreibweise eines Absenders hatte einen eigenen Paperless-Korrespondenten
-  erzeugt; der Bestand trug deshalb `Finanzamt` neben `Finanzamt Erkelenz` und
-  `MANN GEBÄUDETECHNIK` neben `Mann Gebäudetechnik GmbH`. Vor dem Anlegen wird gegen
-  die vorhandenen Namen gematcht (case-insensitive, Vagheit-in-Spezifik-Enthaltung,
-  bei Mehrdeutigkeit derjenige mit den meisten Dokumenten). Aufloesung statt Raten:
-  zwei gleich starke Kandidaten fuehren zu keinem Match, dann entsteht wie bisher
-  ein neuer Name.
+- **Kanonischer Korrespondent** (`resolve_existing_name` in
+  `app/paperless_client.py`, aufgerufen von `resolve_correspondent_name` im
+  Classifier). Jede neue Schreibweise eines Absenders hatte einen eigenen
+  Paperless-Korrespondenten erzeugt; der Bestand trug deshalb `Finanzamt` neben
+  `Finanzamt Erkelenz` und `MANN GEBÄUDETECHNIK` neben `Mann Gebäudetechnik GmbH`.
+  Gegen die vorhandenen Namen wird case-insensitive gematcht
+  (Vagheit-in-Spezifik-Enthaltung, bei Mehrdeutigkeit derjenige mit den meisten
+  Dokumenten). Aufloesung statt Raten: zwei gleich starke Kandidaten fuehren zu
+  keinem Match, dann entsteht wie bisher ein neuer Name.
+  Der Aufruf sitzt bewusst **vor** Kernsuche, Steuer-Regel und Titelbau und nicht
+  nur im Schreibpfad: pid 92 nannte das Modell `wärme-, energie- und
+  prozesstechnik gmbh` (die OCR-Zeile ohne das `WEP` dahinter), pid 90 und 91
+  waren unter dem vollen Namen freigegeben. Dieselbe Person war also ein zweiter
+  Schluessel - der bestaetigte Kern `Energie, Strom, Versorger` schwieg, das
+  Titelbild begann mit `Rechnung_wärme_`, und als unverdaechtigen Zusatz brachte
+  das Modell `Abrechnung` mit, das Paperless nicht kennt. Die Regel laeuft nur,
+  wenn die Absender-Regel darunter nicht schon einen Namen aus dem Bestand
+  geliefert hat; ein Markertext im Feld `reason` weist die Umbiegung aus.
 - **Groeschriebene Absendernamen** (`to_display_case`, `app/paperless_client.py`).
   Briefkoepfe stehen oft komplett in Grossbuchstaben und ein 4B-Modell kopiert
   das: `MANN GEBÄUDETECHNIK` lief neben `Mann Gebäudetechnik GmbH` ein. Nur Namen
@@ -427,19 +455,28 @@ weil ein 4B-Modell sie auch nach dem Prompt-Fix nicht zuverlaessig selbst trifft
   41836 Hückelhoven` (pid 85, 86). Weil der Kern-Tags-Schluessel der Absender
   ist, schaltet so ein Lesefehler die ganze Regelkette aus, und dieselben drei
   Werte standen zweimal zum Nachtragen. Die Regel sucht deshalb die Absender aus
-  `documents_correspondent` im OCR-Text (normalisiert, Namen unter
-  `MIN_CONTAINMENT_MATCH_CHARS` bleiben zu allgemein) und uebernimmt den
-  gefundenen Namen vor `to_display_case`, Steuer-Regel, Kernsuche und Titelbau.
-  Bewusst nur bei genau einem Treffer: zwei bekannte Absender in einem Dokument
-  sind entweder Empfaenger oder Referenz, das ist seine Entscheidung. Auf seinem
-  echten Bestand (65 Exzerpte, Stand 2026-09-22) liefert das 58 eindeutige
-  Treffer, 1 mehrdeutige, 6 ohne Treffer, und **0** der 58 widersprechen dem, was
-  Paperless fuer das Dokument traegt. Vier Dokumente haette die Regel umgeschrieben
-  (32, 38, 85, 86): bei 32 aendert sich nur die Schreibweise in der Queue, die
-  Paperless-ID bleibt dieselbe, bei 85 und 86 wird aus dem Adressfragment der
-  echte Absender, und bei 38 zieht die Korrektur auf `Finanzamt Erkelenz` gleich
-  die Steuer-Regel nach sich, die der Modell-Absender `Allianz` nicht ausloesen
-  konnte. Der fruehere Verdacht, ein zerlegtes `ue`
+  `documents_correspondent` im **Dokumentkopf** (erste `SENDER_HEAD_CHARS` = 300
+  Zeichen, normalisiert; Namen unter `MIN_CONTAINMENT_MATCH_CHARS` bleiben zu
+  allgemein) und uebernimmt den gefundenen Namen vor `to_display_case`,
+  Steuer-Regel, Kernsuche und Titelbau. Zwei Beschraenkungen sind Absicht:
+  genau ein Treffer (zwei bekannte Absender in einem Dokument sind Empfaenger
+  oder Referenz, das ist seine Entscheidung) und der Kopf (ein bekannter Name
+  weiter unten ist ein Dritter). Der Kopf-Fenster-Grund ist pid 90: Aussteller
+  war `WEP Waerme-, Energie- und Prozesstechnik GmbH`, der einzige Listenname im
+  ganzen Exzerpt stand bei Zeichen 2135 in `Messstellenbetreiber: NEW Netz GmbH`
+  - die Regel ueberschrieb dort ein korrektes Modellergebnis, und weil auf dem
+  dabei entstehenden Schluessel `NEW Netz GmbH / Rechnung` ein Kern mit zwei
+  Belegen liegt, lief das Dokument automatisch durch. Auf seinem echten Bestand
+  (65 Exzerpte, Stand 2026-09-22) liefert die Regel 59 eindeutige Treffer, 0
+  mehrdeutige, 10 ohne Treffer, und **0** widersprechen dem, was Paperless fuer
+  das Dokument traegt. Gegenueber der Version ohne Kopf-Fenster fehlen drei
+  Treffer (pid 35, 52, 74) - bei allen dreien hatte das Modell denselben Namen
+  selbst bereits korrekt gesagt, die Regel ware also ein Null-Op gewesen. Vier
+  Dokumente schreibt sie um (32, 38, 85, 86): bei 32 aendert sich nur die
+  Schreibweise in der Queue, die Paperless-ID bleibt dieselbe, bei 85 und 86 wird
+  aus dem Adressfragment der echte Absender, und bei 38 zieht die Korrektur auf
+  `Finanzamt Erkelenz` gleich die Steuer-Regel nach sich, die der Modell-Absender
+  `Allianz` nicht ausloesen konnte. Der fruehere Verdacht, ein zerlegtes `ue`
   (`u` + U+0308) sei die Ursache, ist gemessen widerlegt: der Name steht
   vorcomposed in Postgres (`c3 bc`, 27 Zeichen / 28 Bytes) und in allen 65
   Exzerpten ist kein einziges kombinierendes Zeichen.

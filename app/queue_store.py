@@ -71,10 +71,20 @@ class PersistentQueueStore:
                     last_error TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    next_attempt_at TEXT
+                    next_attempt_at TEXT,
+                    force INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
+            # A queue from before this column has to stay usable: SQLite has no
+            # ADD COLUMN IF NOT EXISTS, so the table info is checked instead.
+            columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(processing_jobs)")
+            }
+            if "force" not in columns:
+                conn.execute(
+                    "ALTER TABLE processing_jobs ADD COLUMN force INTEGER NOT NULL DEFAULT 0"
+                )
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_processing_jobs_ready
@@ -108,10 +118,10 @@ class PersistentQueueStore:
                 conn.execute(
                     """
                     INSERT INTO processing_jobs
-                    (document_id, state, attempts, created_at, updated_at, next_attempt_at)
-                    VALUES (?, ?, 0, ?, ?, ?)
+                    (document_id, state, attempts, created_at, updated_at, next_attempt_at, force)
+                    VALUES (?, ?, 0, ?, ?, ?, ?)
                     """,
-                    (document_id, STATE_QUEUED, now, now, now),
+                    (document_id, STATE_QUEUED, now, now, now, int(force)),
                 )
                 conn.commit()
                 return {
@@ -141,10 +151,11 @@ class PersistentQueueStore:
             conn.execute(
                 """
                 UPDATE processing_jobs
-                SET state = ?, attempts = 0, last_error = NULL, updated_at = ?, next_attempt_at = ?
+                SET state = ?, attempts = 0, last_error = NULL, updated_at = ?,
+                    next_attempt_at = ?, force = ?
                 WHERE document_id = ?
                 """,
-                (STATE_QUEUED, now, now, document_id),
+                (STATE_QUEUED, now, now, int(force), document_id),
             )
             conn.commit()
             return {
@@ -153,6 +164,16 @@ class PersistentQueueStore:
                 "queued": True,
                 "status": STATE_QUEUED,
             }
+
+    def is_forced(self, document_id: int) -> bool:
+        """Whether the running attempt was ordered in spite of a final status."""
+
+        with self._session() as conn:
+            row = conn.execute(
+                "SELECT force FROM processing_jobs WHERE document_id = ?",
+                (document_id,),
+            ).fetchone()
+        return bool(row and int(row["force"]) == 1)
 
     def claim_next(self) -> int | None:
         now = self._now()
@@ -200,7 +221,8 @@ class PersistentQueueStore:
             conn.execute(
                 """
                 UPDATE processing_jobs
-                SET state = ?, last_error = NULL, updated_at = ?, next_attempt_at = NULL
+                SET state = ?, last_error = NULL, updated_at = ?, next_attempt_at = NULL,
+                    force = 0
                 WHERE document_id = ? AND state = ?
                 """,
                 (STATE_DONE, self._now(), document_id, STATE_PROCESSING),
@@ -229,7 +251,8 @@ class PersistentQueueStore:
                 conn.execute(
                     """
                     UPDATE processing_jobs
-                    SET state = ?, last_error = ?, updated_at = ?, next_attempt_at = NULL
+                    SET state = ?, last_error = ?, updated_at = ?, next_attempt_at = NULL,
+                        force = 0
                     WHERE document_id = ? AND state = ?
                     """,
                     (STATE_DEAD, error[:4000], now, document_id, STATE_PROCESSING),
@@ -245,7 +268,7 @@ class PersistentQueueStore:
             conn.execute(
                 """
                 UPDATE processing_jobs
-                SET state = ?, last_error = ?, updated_at = ?, next_attempt_at = ?
+                SET state = ?, last_error = ?, updated_at = ?, next_attempt_at = ?, force = 0
                 WHERE document_id = ? AND state = ?
                 """,
                 (

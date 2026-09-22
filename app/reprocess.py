@@ -6,23 +6,30 @@ from app.config import settings
 from app.db import Database
 
 
-def enqueue_paperless_document(paperless_id: int) -> str:
+def enqueue_paperless_document(paperless_id: int, *, force: bool = False) -> str:
     """Submit a document to the AI worker queue.
 
     Review UI runs in a separate process/container from the trigger server, so
     it must use the same HTTP boundary as Paperless instead of classifying
     inline. That keeps Ollama calls serialized by app.document_queue.
+
+    ``force`` asks the worker to classify the document even when its queue row
+    already holds a final status; that is what the reprocess page orders.
     """
+    payload: dict[str, int | bool] = {"document_id": paperless_id}
+    if force:
+        payload["force"] = True
+
     response = requests.post(
         settings.ai_worker_trigger_url,
-        json={"document_id": paperless_id},
+        json=payload,
         timeout=10,
     )
     response.raise_for_status()
 
-    payload = response.json()
-    status = payload.get("status", "UNKNOWN")
-    queue_size = payload.get("queue_size", "unknown")
+    body = response.json()
+    status = body.get("status", "UNKNOWN")
+    queue_size = body.get("queue_size", "unknown")
     return f"{status} (queue_size={queue_size})"
 
 

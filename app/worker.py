@@ -35,12 +35,16 @@ class Worker:
             logger.info("Paperless ist nicht verfügbar. Warte...")
             time.sleep(5)
 
-    def process_once(self, document_id: int) -> str:
+    def process_once(self, document_id: int, force: bool = False) -> str:
         self.wait_for_paperless()
 
         # Failures are not part of this set, otherwise the retry that the queue
         # or the review UI scheduled would be swallowed as ALREADY_PROCESSED.
-        if self.classifier.db.exists_paperless_id(
+        # A forced job skips the check entirely: the review UI's reprocess page
+        # is a human order to classify this document again, and every status
+        # except the failures is final, so without it a finished document could
+        # only be reprocessed by deleting its queue row.
+        if not force and self.classifier.db.exists_paperless_id(
             document_id,
             statuses=reprocessable_statuses(dry_run=settings.dry_run),
         ):
@@ -49,6 +53,9 @@ class Worker:
                 document_id,
             )
             return "ALREADY_PROCESSED"
+
+        if force:
+            logger.info("Document %s is reprocessed because it was forced.", document_id)
 
         logger.info("Processing document %s.", document_id)
 

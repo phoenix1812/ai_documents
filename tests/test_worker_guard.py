@@ -64,6 +64,16 @@ def test_deterministic_failure_is_still_retried_on_demand(worker_with_db):
     assert worker.process_once(document_id=42) == STATUS_NEEDS_REVIEW
 
 
+def test_a_forced_rerun_classifies_even_after_a_final_status(worker_with_db):
+    """A manual rerun is exactly the case the guard was built for: the row says
+    DONE, the user still wants the document through the model."""
+
+    worker, db = worker_with_db
+    insert(db, 41, STATUS_SKIPPED_DUPLICATE)
+
+    assert worker.process_once(document_id=41, force=True) == STATUS_NEEDS_REVIEW
+
+
 def test_reconciliation_still_treats_failures_as_final():
     final = set(final_statuses(dry_run=True))
     reprocessable = set(reprocessable_statuses(dry_run=True))

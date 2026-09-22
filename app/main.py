@@ -81,8 +81,8 @@ class TriggerHandler(BaseHTTPRequestHandler):
             if processing_queue is None:
                 raise RuntimeError("Processing queue not initialized")
 
-            document_id = self._extract_document_id(parsed.query)
-            status = processing_queue.enqueue(document_id)
+            document_id, force = self._extract_request(parsed.query)
+            status = processing_queue.enqueue(document_id, force=force)
 
             self._send_json(
                 202,
@@ -98,11 +98,20 @@ class TriggerHandler(BaseHTTPRequestHandler):
             logger.exception("Failed to accept triggered document.")
             self._send_json(400, {"error": str(exc)})
 
-    def _extract_document_id(self, query: str) -> int:
+    def _extract_request(self, query: str) -> tuple[int, bool]:
+        """The document to process and whether to override a final status.
+
+        ``force`` is the review UI's reprocess order: every status except a
+        failure is final, so without it a finished document cannot be classified
+        again.
+        """
+
         params = parse_qs(query)
 
         if "document_id" in params:
-            return int(params["document_id"][0])
+            document_id = int(params["document_id"][0])
+            force = params.get("force", ["false"])[0].lower() in {"1", "true", "yes"}
+            return document_id, force
 
         content_length = int(self.headers.get("Content-Length", "0"))
         if content_length <= 0:
@@ -114,7 +123,7 @@ class TriggerHandler(BaseHTTPRequestHandler):
         if "document_id" not in payload:
             raise ValueError("Missing document_id")
 
-        return int(payload["document_id"])
+        return int(payload["document_id"]), bool(payload.get("force", False))
 
     def log_message(self, format: str, *args) -> None:
         logger.info("%s - %s", self.address_string(), format % args)

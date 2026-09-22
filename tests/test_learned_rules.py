@@ -163,10 +163,56 @@ def test_a_sender_named_only_by_its_short_mark_is_not_guessed() -> None:
     ) is None
 
 
+def test_a_known_name_in_the_body_is_not_the_sender() -> None:
+    """pid 90: the issuer was WEP GmbH and the only name from his list in the
+    whole page was "Messstellenbetreiber: NEW Netz GmbH", some 2000 characters
+    down. A third party named in the body must not overwrite the letterhead."""
+
+    wep_head = (
+        "wärme-, energie- und prozesstechnik gmbh Ry, Sy WEP GmbH - Postfach 1330 "
+        "- 41825 Hückelhoven Herrn Ihre Ansprechpartner: Waldemar Holderbein "
+        "Elbestr. 9 Verbrauchsabrechnung Strom Telefon: 02433 902-888 "
+    )
+    body = "x" * 2000 + " Messstellenbetreiber: NEW Netz GmbH - Strom gzMSB"
+    client = _sender_client(SENDERS)
+
+    assert client.correspondent_from_text(wep_head) is None
+    assert client.correspondent_from_text(wep_head + body) is None
+    # The same name inside the window still resolves, so the limit is a window
+    # and not a ban.
+    assert client.correspondent_from_text(wep_head + " NEW Netz GmbH") == "NEW Netz GmbH"
+
+
 def test_text_without_any_sender_names_the_lookup() -> None:
     client = _sender_client(SENDERS)
     assert client.correspondent_from_text("Kontoauszug 12/2025 Saldo 412,09 EUR") is None
     assert client.correspondent_from_text("") is None
+
+
+WEP = "WEP Wärme-, Energie- und Prozesstechnik GmbH"
+
+# What the OCR of pid 92 put at the top of the page: the company name without its
+# "WEP" prefix, because that line sits behind it in the scan.
+WEP_HEAD = (
+    "wärme-, energie- und prozesstechnik gmbh WEP GmbH - Postfach 1330 "
+    "41825 Hückelhoven Herrn Ihre Ansprechpartner: Waldemar Holderbein "
+    "Elbestr. 9 Verbrauchsabrechnung Strom Datum: 27.01.2023 Betrag 851,14 EUR"
+)
+
+
+def test_a_sender_written_the_way_the_scan_shows_it_becomes_the_established_one() -> None:
+    assert _sender_client([WEP, "NEW Netz GmbH"]).resolve_correspondent_name(
+        "wärme-, energie- und prozesstechnik gmbh"
+    ) == WEP
+
+
+def test_a_sender_paperless_does_not_know_yet_stays_as_the_model_wrote_it() -> None:
+    client = _sender_client([WEP])
+    assert client.resolve_correspondent_name("Muster Stadtwerke Nebenan") is None
+    assert client.resolve_correspondent_name("") is None
+    assert client.resolve_correspondent_name("WEP Wärme-, Energie- und Prozesstechnik GmbH") == (
+        WEP
+    )
 
 
 def _db_with_decision(tmp_path, paperless_id: int = 42) -> Database:
@@ -388,6 +434,7 @@ def test_the_rule_rewrites_the_title_before_paperless_sees_it(tmp_path, monkeypa
         ),
         unknown_tag_names=lambda names: [],
         correspondent_from_text=lambda text: None,
+        resolve_correspondent_name=lambda name: None,
     )
     classifier.ollama = SimpleNamespace(
         classify=lambda content: ClassificationResult(
@@ -462,6 +509,7 @@ def test_the_classifier_stores_the_shouted_sender_in_nice_case(
         ),
         unknown_tag_names=lambda names: [],
         correspondent_from_text=lambda text: None,
+        resolve_correspondent_name=lambda name: None,
     )
     classifier.ollama = SimpleNamespace(
         classify=lambda content: ClassificationResult(
@@ -514,11 +562,13 @@ def _classifier(
     document_type="Steuer",
     content="Stadt Hückelhoven\nGrundsteuerbescheid\nBetrag 312,40 EUR",
     amount=None,
+    known_names=(),
 ):
     """Worker with the model, Paperless and the queue replaced by fakes.
 
     `listed` is what the sender lookup finds in the text, `model_sender` what the
-    model read off the letterhead.
+    model read off the letterhead, `known_names` the correspondents Paperless
+    already carries.
     """
 
     from types import SimpleNamespace
@@ -528,6 +578,16 @@ def _classifier(
     monkeypatch.setattr(settings, "db_path", str(tmp_path))
     monkeypatch.setattr(settings, "dry_run", False)
     monkeypatch.setattr(settings, "confidence_threshold", 0.90)
+
+    def resolve(name):
+        match = resolve_existing_name(
+            name or "",
+            [
+                {"id": index, "name": known, "document_count": 1}
+                for index, known in enumerate(known_names, start=1)
+            ],
+        )
+        return match["name"] if match else None
 
     applied: dict = {}
     classifier = DocumentClassifier.__new__(DocumentClassifier)
@@ -540,6 +600,7 @@ def _classifier(
         ),
         unknown_tag_names=lambda names: list(unknown_tags),
         correspondent_from_text=lambda text: listed,
+        resolve_correspondent_name=resolve,
     )
     classifier.ollama = SimpleNamespace(
         classify=lambda content: ClassificationResult(
@@ -723,3 +784,55 @@ def test_a_sender_that_was_already_right_is_left_alone(tmp_path, monkeypatch) ->
 
     assert applied["correspondent"] == "Stadt Hückelhoven"
     assert "Absender" not in _stored(classifier, 58)["reason"]
+
+
+def test_the_same_sender_in_another_spelling_reaches_his_own_kernel(
+    tmp_path, monkeypatch
+) -> None:
+    """pid 92 against 90 and 91: the model named the issuer by the OCR fragment
+    alone. The kernel he had confirmed on two documents hangs on the full name, so
+    it went quiet and the invented tags of the model became his problem again."""
+
+    classifier, applied = _classifier(
+        tmp_path,
+        monkeypatch,
+        tags=["Strom", "Energie", "Abrechnung", "Verbrauch"],
+        model_sender="wärme-, energie- und prozesstechnik gmbh",
+        document_type="Rechnung",
+        content=WEP_HEAD,
+        amount="851,14 EUR",
+        known_names=[WEP],
+    )
+    for paperless_id in (90, 91):
+        _approved(classifier.db, paperless_id=paperless_id,
+                  correspondent=WEP, document_type="Rechnung",
+                  tags=["Energie", "Strom", "Versorger"])
+
+    assert classifier.process_document(document_id=92) == STATUS_AUTO_APPROVED
+
+    assert applied["correspondent"] == WEP
+    assert applied["tags"] == ["Energie", "Strom", "Versorger"]
+    assert applied["title"].startswith("Rechnung_WEP")
+
+    row = _stored(classifier, 92)
+    assert "Regel: Schreibweise aus deinem Bestand" in row["reason"]
+    assert "Regel: Kern-Tags uebernommen" in row["reason"]
+
+
+def test_an_established_sender_name_is_not_marked_as_changed(tmp_path, monkeypatch) -> None:
+    """The resolution is a cleanup, so it may only claim a change it made."""
+
+    classifier, applied = _classifier(
+        tmp_path,
+        monkeypatch,
+        tags=["Energie", "Strom", "Versorger"],
+        model_sender=WEP,
+        document_type="Rechnung",
+        content=WEP_HEAD,
+        amount="851,14 EUR",
+        known_names=[WEP],
+    )
+
+    assert classifier.process_document(document_id=93) == STATUS_AUTO_APPROVED
+    assert applied["correspondent"] == WEP
+    assert "Schreibweise" not in _stored(classifier, 93)["reason"]

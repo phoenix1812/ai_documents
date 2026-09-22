@@ -554,7 +554,7 @@ def reprocess_submit(
     paperless_id: int = Form(...),
 ):
     try:
-        result = enqueue_paperless_document(int(paperless_id))
+        result = enqueue_paperless_document(int(paperless_id), force=True)
 
         return templates.TemplateResponse(
             "reprocess.html",

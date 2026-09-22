@@ -25,6 +25,12 @@ DUPLICATE_TAG_NAME = "Duplikat"
 # would happily swallow "AXA Krankenversicherung AG" and "Kasse" everything.
 MIN_CONTAINMENT_MATCH_CHARS = 6
 
+# How far into the document the sender lookup reads. A letterhead is at the top;
+# below this window a known name is more likely the recipient, a utility
+# reference or, as on paperless 90, "Messstellenbetreiber: NEW Netz GmbH" - a
+# third party that would overwrite the real issuer.
+SENDER_HEAD_CHARS = 300
+
 
 def normalize_name(value: str | None) -> str:
     """Case- and punctuation-insensitive form used to compare Paperless names."""
@@ -242,7 +248,7 @@ class PaperlessClient:
         return [name for name in names if normalize_name(name) not in existing]
 
     def correspondent_from_text(self, text: str) -> str | None:
-        """The correspondent Paperless already carries, if the document names exactly one.
+        """The correspondent Paperless already carries, if the document head names exactly one.
 
         Reading the sender off a letterhead is the field this model keeps failing:
         from "Hans-Peter Schiffer-Kueppers, Schornsteinfegermeister, Katharinenstr.
@@ -252,9 +258,16 @@ class PaperlessClient:
         replaces the guess. Several known senders in one document stay the model's
         decision: measured on his archive, matching the earliest name was wrong on 15
         of 60 documents while requiring exactly one match was wrong on none.
+
+        Only the head is read, because a name further down is usually someone else:
+        on paperless 90 the sole listed name in the whole page was
+        "Messstellenbetreiber: NEW Netz GmbH" at character 2135, and the rule
+        overwrote the real issuer with it. Measured over 65 documents, cutting at
+        ``SENDER_HEAD_CHARS`` keeps every hit the rules chain actually needed and
+        drops only three, each of which the model had already answered correctly.
         """
 
-        haystack = normalize_name(text)
+        haystack = normalize_name(text[:SENDER_HEAD_CHARS])
         if not haystack:
             return None
 
@@ -268,6 +281,31 @@ class PaperlessClient:
             and normalize_name(name) in haystack
         }
         return hits.pop() if len(hits) == 1 else None
+
+    def resolve_correspondent_name(self, name: str) -> str | None:
+        """The spelling Paperless already uses for this sender, if it has one.
+
+        A 4B model copies whatever the OCR shows on the letterhead, so one issuer
+        arrives as "WEP Wärme-, Energie- und Prozesstechnik GmbH" and the next
+        time as the lowercase fragment "wärme-, energie- und prozesstechnik gmbh"
+        that sits behind "WEP GmbH" in the scan (paperless 90 against 92). Kept
+        as the model wrote it, that fragment costs three things: a second
+        correspondent in Paperless, a second title, and - because the tag kernel
+        is keyed on the sender - a rule he has already confirmed going quiet.
+        The lookup hands back the established name before any of those consumers
+        see the guess. It is the same routine the write path uses, moved earlier;
+        ambiguous and merely-shorter names still return None.
+        """
+
+        clean_name = (name or "").strip()
+        if not clean_name:
+            return None
+
+        match = resolve_existing_name(clean_name, self._get_paginated("/api/correspondents/"))
+        if match is None:
+            return None
+
+        return (match.get("name") or "").strip() or None
 
     def get_or_create_document_type_id(self, name: str) -> int | None:
         return self._get_or_create_named_id("/api/document_types/", name)
