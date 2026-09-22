@@ -8,6 +8,7 @@ that Paperless would otherwise create a second time.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -15,11 +16,13 @@ from fastapi import HTTPException
 from app.config import settings
 from app.db import Database
 from app.db import STATUS_AUTO_APPROVED
+from app.db import STATUS_MANUALLY_APPROVED
 from app.db import STATUS_NEEDS_REVIEW
 from app.models import ClassificationResult
 from app.paperless_client import resolve_existing_name
 from app.paperless_client import to_display_case
 from app.review_ui import DEFAULT_CORRECTION_REASON
+from app.review_ui import approve
 from app.review_ui import save_document
 from app.validator import apply_tax_authority_type_rule
 
@@ -238,6 +241,62 @@ def test_a_pure_title_edit_still_needs_no_reason(tmp_path, monkeypatch) -> None:
     assert Database(str(tmp_path)).conn.execute(
         "SELECT title FROM documents WHERE paperless_id = 42"
     ).fetchone()["title"] == "Anderer_Titel"
+
+
+def test_accepting_an_unchanged_proposal_needs_no_reason(tmp_path, monkeypatch) -> None:
+    """A rule can send a correct document to review; accepting it is not a
+    correction, so it must stay possible without writing a reason."""
+
+    monkeypatch.setattr(settings, "db_path", str(tmp_path))
+    _db_with_decision(tmp_path)
+
+    approve(
+        item_id=1,
+        title="Rechnung_Amazon_Bueromaterial_2026-05-12",
+        correspondent="Amazon",
+        document_type="Rechnung",
+        tags="Steuer",
+        apply_to_paperless=False,
+    )
+
+    row = Database(str(tmp_path)).conn.execute(
+        "SELECT status FROM documents WHERE paperless_id = 42"
+    ).fetchone()
+
+    assert row["status"] == STATUS_MANUALLY_APPROVED
+
+
+def test_accepting_a_changed_proposal_is_refused(tmp_path, monkeypatch) -> None:
+    """Without this the accept button would be a way to skip the reason that the
+    learned rules are built from."""
+
+    monkeypatch.setattr(settings, "db_path", str(tmp_path))
+    _db_with_decision(tmp_path)
+
+    with pytest.raises(HTTPException) as excinfo:
+        approve(
+            item_id=1,
+            title="Rechnung_Amazon_Bueromaterial_2026-05-12",
+            correspondent="Amazon",
+            document_type="Rechnung",
+            tags="Steuer, Buero",
+            apply_to_paperless=False,
+        )
+
+    assert excinfo.value.status_code == 400
+    assert "Speichern" in excinfo.value.detail
+
+
+def test_the_form_does_not_demand_a_reason_before_the_server_decides() -> None:
+    """The browser used to block an unchanged accept with required on the field,
+    which is stricter than the rule in save_document."""
+
+    template = (
+        Path(__file__).resolve().parent.parent / "app" / "templates" / "review_detail.html"
+    ).read_text(encoding="utf-8")
+
+    assert 'name="correction_reason" required' not in template
+    assert "/approve" in template
 
 
 def test_the_rule_rewrites_the_title_before_paperless_sees_it(tmp_path, monkeypatch) -> None:

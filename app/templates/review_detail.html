@@ -81,7 +81,7 @@
 
                 <label>
                     Korrekturgrund
-                    <input type="text" name="correction_reason" required
+                    <input type="text" name="correction_reason"
                            placeholder="Was war an der Klassifikation falsch?">
                 </label>
 
@@ -92,6 +92,13 @@
 
                 <div class="row-actions">
                     <button class="button success" type="submit">Speichern</button>
+                    {% if item.status in review_statuses %}
+                        <button class="button secondary" type="submit"
+                                formaction="/items/{{ item.id }}/approve"
+                                title="Den Vorschlag unveraendert freigeben. Nur fuer eine Aenderung brauchst du einen Korrekturgrund.">
+                            Annehmen
+                        </button>
+                    {% endif %}
                     <button class="button secondary" type="submit" name="rebuild_title" value="true"
                             title="Titel neu aus Dokumenttyp, Korrespondent, Thema und Datum bauen und speichern. Ein manuell getippter Titel bleibt erhalten, solange du diese Schaltfläche nicht benutzt.">
                         Titel aus Feldern neu bauen

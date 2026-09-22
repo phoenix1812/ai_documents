@@ -450,6 +450,16 @@ Ohne Grund gibt es HTTP 400 statt eines weiteren „Manuelle Korrektur"-Eintrags
 aus dem sich nichts ableiten laesst. Reine Titelkorrekturen bleiben vom
 Pflichtgrund ausgenommen.
 
+Fuer ein Dokument, das nur wegen einer Regel im Review liegt (Abweichung von den
+Kern-Tags, unbekannter Tag, Confidence unter der Schwelle), ist „korrekt" und
+„geaendert" verschieden: Der Pflichtgrund gilt erst ab einer echten Aenderung,
+deshalb entscheidet allein der Server und nicht das Formular. Dafuer gibt es
+neben „Speichern" die Schaltflaeche „Annehmen" auf `/items/{id}/approve` — sie
+ erscheint nur bei Eintraegen in Review-Status, gibt den Vorschlag unveraendert
+frei und protokolliert ihn als „Manuell freigegeben".
+Annehmen lehnt mit HTTP 400 ab, wenn sich Absender, Typ oder Tags unterscheiden -
+sonst waere der Knopf ein Weg, den Grund zu umgehen, aus dem die Regeln entstehen.
+
 ## Konfiguration
 
 Wichtige Variablen:

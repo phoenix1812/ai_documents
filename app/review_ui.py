@@ -334,6 +334,7 @@ def save_document(
     apply_to_paperless: bool = Form(default=False),
     correction_reason: str = Form(default=DEFAULT_CORRECTION_REASON),
     rebuild_title: bool = Form(default=False),
+    accept_unchanged: bool = Form(default=False),
 ):
     db = get_db()
     item = get_item_or_404(item_id)
@@ -372,6 +373,18 @@ def save_document(
         or clean_document_type != (item.get("document_type") or "").strip()
         or tag_list != (item.get("tags_list") or [])
     )
+
+    # "Annehmen" is the accept path for a proposal that is already right, so it
+    # carries no reason. Without this guard it would also be a way to save a real
+    # correction while skipping the reason that the history depends on.
+    if accept_unchanged is True and changed_content:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Annehmen uebernimmt den Vorschlag unveraendert. Fuer eine "
+                "Aenderung bitte Speichern mit Korrekturgrund benutzen."
+            ),
+        )
 
     if changed_content and correction_reason.strip() in ("", DEFAULT_CORRECTION_REASON):
         raise HTTPException(
@@ -446,6 +459,7 @@ def approve(
         tags=tags,
         apply_to_paperless=apply_to_paperless,
         correction_reason="Manuell freigegeben",
+        accept_unchanged=True,
     )
 
 
