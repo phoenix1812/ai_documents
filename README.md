@@ -420,6 +420,29 @@ weil ein 4B-Modell sie auch nach dem Prompt-Fix nicht zuverlaessig selbst trifft
   Schreibweise mit Kleinbuchstaben gilt als eigene Gestaltung der Firma
   (`ALTE LEIPZIGER Versicherung Aktiengesellschaft`). Sie laeuft im Classifier vor
   dem Titelbau und zusaetzlich beim Anlegen des Korrespondenten.
+- **Absender aus deinem Bestand** (`correspondent_from_text`,
+  `app/paperless_client.py`). Der Absender ist das Feld, an dem dieses Modell
+  scheitert: aus `Hans-Peter Schiffer-Küppers Schornsteinfegermeister
+  Katharinenstr. 23 41836 Hückelhoven` wurde `Schiffer-Küppers, Katharinenstr. 23,
+  41836 Hückelhoven` (pid 85, 86). Weil der Kern-Tags-Schluessel der Absender
+  ist, schaltet so ein Lesefehler die ganze Regelkette aus, und dieselben drei
+  Werte standen zweimal zum Nachtragen. Die Regel sucht deshalb die Absender aus
+  `documents_correspondent` im OCR-Text (normalisiert, Namen unter
+  `MIN_CONTAINMENT_MATCH_CHARS` bleiben zu allgemein) und uebernimmt den
+  gefundenen Namen vor `to_display_case`, Steuer-Regel, Kernsuche und Titelbau.
+  Bewusst nur bei genau einem Treffer: zwei bekannte Absender in einem Dokument
+  sind entweder Empfaenger oder Referenz, das ist seine Entscheidung. Auf seinem
+  echten Bestand (65 Exzerpte, Stand 2026-09-22) liefert das 58 eindeutige
+  Treffer, 1 mehrdeutige, 6 ohne Treffer, und **0** der 58 widersprechen dem, was
+  Paperless fuer das Dokument traegt. Vier Dokumente haette die Regel umgeschrieben
+  (32, 38, 85, 86): bei 32 aendert sich nur die Schreibweise in der Queue, die
+  Paperless-ID bleibt dieselbe, bei 85 und 86 wird aus dem Adressfragment der
+  echte Absender, und bei 38 zieht die Korrektur auf `Finanzamt Erkelenz` gleich
+  die Steuer-Regel nach sich, die der Modell-Absender `Allianz` nicht ausloesen
+  konnte. Der fruehere Verdacht, ein zerlegtes `ue`
+  (`u` + U+0308) sei die Ursache, ist gemessen widerlegt: der Name steht
+  vorcomposed in Postgres (`c3 bc`, 27 Zeichen / 28 Bytes) und in allen 65
+  Exzerpten ist kein einziges kombinierendes Zeichen.
 - **Funktion statt Absender** im System-Prompt: Zahlungsaufruf mit Betrag und
   Faelligkeitsdatum ist `Rechnung` (auch von einer Versicherung), was den Vertrag
   selbst betrifft ist `Versicherung`, Behoerdenbescheid ueber Abgaben ist

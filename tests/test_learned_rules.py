@@ -107,6 +107,68 @@ def test_equal_document_counts_refuse_to_guess() -> None:
     assert resolve_existing_name("Muster Stadtwerke", tied) is None
 
 
+def _sender_client(names):
+    """Paperless client whose correspondent list is exactly `names`."""
+
+    from app.paperless_client import PaperlessClient
+
+    client = PaperlessClient.__new__(PaperlessClient)
+    client._get_paginated = lambda path: [
+        {"id": index, "name": name} for index, name in enumerate(names, start=1)
+    ]
+    return client
+
+
+SENDERS = [
+    "Hans-Peter Schiffer-Küppers",
+    "Stadt Hückelhoven",
+    "NEW Netz GmbH",
+    "ERGO",
+]
+
+# The letterhead of pid 85: the model returned the address fragment.
+SCHIFFER_HEAD = (
+    "SEPA-Überweisung/Zahlschein Hans-Peter Schiffer-Küppers "
+    "Schornsteinfegermeister/Energieberater Katharinenstr. 23 41836 Hückelhoven "
+    "Tel.: 02433-441648 schiffer-kueppers@freenet.de "
+    "Schiffer-Küppers, Katharinenstr. 23, 41836 Hückelhoven 13.11.2023"
+)
+
+
+def test_a_known_sender_named_in_the_text_is_found() -> None:
+    assert _sender_client(SENDERS).correspondent_from_text(SCHIFFER_HEAD) == (
+        "Hans-Peter Schiffer-Küppers"
+    )
+
+
+def test_the_match_ignores_case_and_punctuation() -> None:
+    text = "Rechnung an: NEW-NETZ-GMBH, Hindenburgplatz 90, 41460 Neuss"
+    assert _sender_client(SENDERS).correspondent_from_text(text) == "NEW Netz GmbH"
+
+
+def test_two_known_senders_in_one_document_stay_the_model_decision() -> None:
+    """Choosing the first name that appears was wrong on 15 of his 60 documents.
+
+    A second sender is either the recipient or a reference, so this is his call
+    and the lookup declines it.
+    """
+
+    text = SCHIFFER_HEAD + " Kunde: Stadt Hückelhoven, Amt 90"
+    assert _sender_client(SENDERS).correspondent_from_text(text) is None
+
+
+def test_a_sender_named_only_by_its_short_mark_is_not_guessed() -> None:
+    assert _sender_client(SENDERS).correspondent_from_text(
+        "Beitragsrechnung ERGO Versicherung 2026, Beitrag 84,12 EUR"
+    ) is None
+
+
+def test_text_without_any_sender_names_the_lookup() -> None:
+    client = _sender_client(SENDERS)
+    assert client.correspondent_from_text("Kontoauszug 12/2025 Saldo 412,09 EUR") is None
+    assert client.correspondent_from_text("") is None
+
+
 def _db_with_decision(tmp_path, paperless_id: int = 42) -> Database:
     db = Database(str(tmp_path))
     db.insert_document(
@@ -325,6 +387,7 @@ def test_the_rule_rewrites_the_title_before_paperless_sees_it(tmp_path, monkeypa
             applied.update(kwargs) or {"title": kwargs["title"]}
         ),
         unknown_tag_names=lambda names: [],
+        correspondent_from_text=lambda text: None,
     )
     classifier.ollama = SimpleNamespace(
         classify=lambda content: ClassificationResult(
@@ -398,6 +461,7 @@ def test_the_classifier_stores_the_shouted_sender_in_nice_case(
             applied.update(kwargs) or {"title": kwargs["title"]}
         ),
         unknown_tag_names=lambda names: [],
+        correspondent_from_text=lambda text: None,
     )
     classifier.ollama = SimpleNamespace(
         classify=lambda content: ClassificationResult(
@@ -438,8 +502,24 @@ def _approved(db, *, paperless_id, correspondent, document_type, tags) -> None:
     )
 
 
-def _classifier(tmp_path, monkeypatch, *, tags, unknown_tags=(), confidence=0.98):
-    """Worker with the model, Paperless and the queue replaced by fakes."""
+def _classifier(
+    tmp_path,
+    monkeypatch,
+    *,
+    tags,
+    unknown_tags=(),
+    confidence=0.98,
+    listed=None,
+    model_sender="Stadt Hückelhoven",
+    document_type="Steuer",
+    content="Stadt Hückelhoven\nGrundsteuerbescheid\nBetrag 312,40 EUR",
+    amount=None,
+):
+    """Worker with the model, Paperless and the queue replaced by fakes.
+
+    `listed` is what the sender lookup finds in the text, `model_sender` what the
+    model read off the letterhead.
+    """
 
     from types import SimpleNamespace
 
@@ -454,25 +534,24 @@ def _classifier(tmp_path, monkeypatch, *, tags, unknown_tags=(), confidence=0.98
     classifier.db = Database(str(tmp_path))
     classifier.paperless = SimpleNamespace(
         download_document=lambda document_id: b"pdf-bytes",
-        get_document=lambda document_id: {
-            "content": "Stadt Hückelhoven\nGrundsteuerbescheid\nBetrag 312,40 EUR",
-            "title": "scan",
-        },
+        get_document=lambda document_id: {"content": content, "title": "scan"},
         update_document_metadata_by_names=lambda **kwargs: (
             applied.update(kwargs) or {"title": kwargs["title"]}
         ),
         unknown_tag_names=lambda names: list(unknown_tags),
+        correspondent_from_text=lambda text: listed,
     )
     classifier.ollama = SimpleNamespace(
         classify=lambda content: ClassificationResult(
-            document_type="Steuer",
-            correspondent="Stadt Hückelhoven",
+            document_type=document_type,
+            correspondent=model_sender,
             title="unbenannt",
             subject="Grundsteuerbescheid",
             document_date="2026-01-23",
             confidence=confidence,
             reason="Grundsteuerbescheid der Stadt",
             tags=tags,
+            amount=amount,
         ),
     )
     return classifier, applied
@@ -586,3 +665,61 @@ def test_a_known_tag_set_without_kernel_still_auto_approves(tmp_path, monkeypatc
 
     assert classifier.process_document(document_id=56) == STATUS_AUTO_APPROVED
     assert applied["tags"] == ["Grundsteuer", "Steuer"]
+
+
+def test_a_sender_the_model_misread_is_taken_from_his_own_list(
+    tmp_path, monkeypatch
+) -> None:
+    """pid 85 and 86: the model answered "Schiffer-Küppers, Katharinenstr. 23,
+    41836 Hückelhoven". Because the tag kernel is keyed on the sender, that one
+    misread field switched the whole rule chain off and left him retyping the
+    same three values twice."""
+
+    listed = _sender_client(SENDERS).correspondent_from_text(SCHIFFER_HEAD)
+    assert listed == "Hans-Peter Schiffer-Küppers"  # the premise of this test
+
+    classifier, applied = _classifier(
+        tmp_path, monkeypatch,
+        tags=["Reinigung", "Energie", "Handwerk"],
+        listed=listed,
+        model_sender="Schiffer-Küppers, Katharinenstr. 23, 41836 Hückelhoven",
+        document_type="Rechnung",
+        content=SCHIFFER_HEAD,
+        amount="148,00 EUR",
+    )
+    for paperless_id in (83, 84):
+        _approved(classifier.db, paperless_id=paperless_id,
+                  correspondent="Hans-Peter Schiffer-Küppers", document_type="Rechnung",
+                  tags=["Kamin", "Schornstein"])
+
+    assert classifier.process_document(document_id=85) == STATUS_AUTO_APPROVED
+
+    assert applied["correspondent"] == "Hans-Peter Schiffer-Küppers"
+    assert applied["tags"] == ["Kamin", "Schornstein"]
+    # Before the title is built, or Paperless keeps the address fragment there.
+    assert applied["title"].startswith("Rechnung_Hans")
+    row = _stored(classifier, 85)
+    assert json.loads(row["tags"]) == ["Kamin", "Schornstein"]
+    assert "Regel: Absender aus deinem Bestand" in row["reason"]
+
+
+def test_a_sender_that_was_already_right_is_left_alone(tmp_path, monkeypatch) -> None:
+    """The rule is a correction, not a rewrite: the same name in the model's
+    shouted spelling must not add a marker claiming a change that never
+    happened."""
+
+    classifier, applied = _classifier(
+        tmp_path, monkeypatch,
+        tags=["Grundsteuer", "Zähler"],
+        listed="Stadt Hückelhoven",
+        model_sender="STADT HÜCKELHOVEN",
+    )
+    for paperless_id in (52, 53):
+        _approved(classifier.db, paperless_id=paperless_id,
+                  correspondent="Stadt Hückelhoven", document_type="Steuer",
+                  tags=["Grundsteuer", "Nebenkosten"])
+
+    assert classifier.process_document(document_id=58) == STATUS_AUTO_APPROVED
+
+    assert applied["correspondent"] == "Stadt Hückelhoven"
+    assert "Absender" not in _stored(classifier, 58)["reason"]

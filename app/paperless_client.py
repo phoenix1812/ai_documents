@@ -241,6 +241,34 @@ class PaperlessClient:
         existing = {normalize_name(item.get("name")) for item in self._get_paginated("/api/tags/")}
         return [name for name in names if normalize_name(name) not in existing]
 
+    def correspondent_from_text(self, text: str) -> str | None:
+        """The correspondent Paperless already carries, if the document names exactly one.
+
+        Reading the sender off a letterhead is the field this model keeps failing:
+        from "Hans-Peter Schiffer-Kueppers, Schornsteinfegermeister, Katharinenstr.
+        23, 41836 Hueckelhoven" it returns the address fragment, and because the tag
+        kernel is keyed on that string the whole rule chain stops. His senders are a
+        closed list and their names are printed in the documents, so the lookup
+        replaces the guess. Several known senders in one document stay the model's
+        decision: measured on his archive, matching the earliest name was wrong on 15
+        of 60 documents while requiring exactly one match was wrong on none.
+        """
+
+        haystack = normalize_name(text)
+        if not haystack:
+            return None
+
+        hits = {
+            name
+            for name in (
+                (item.get("name") or "").strip()
+                for item in self._get_paginated("/api/correspondents/")
+            )
+            if len(normalize_name(name)) >= MIN_CONTAINMENT_MATCH_CHARS
+            and normalize_name(name) in haystack
+        }
+        return hits.pop() if len(hits) == 1 else None
+
     def get_or_create_document_type_id(self, name: str) -> int | None:
         return self._get_or_create_named_id("/api/document_types/", name)
 

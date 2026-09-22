@@ -27,6 +27,7 @@ from app.hash_store import sha256
 from app.models import ClassificationResult
 from app.ollama_client import OllamaClient
 from app.paperless_client import PaperlessClient
+from app.paperless_client import normalize_name
 from app.paperless_client import to_display_case
 from app.validator import apply_tax_authority_type_rule
 from app.validator import validate_classification
@@ -412,6 +413,22 @@ class DocumentClassifier:
 
             result.tags = clean_paperless_tags(result.tags)
 
+            # A sender he already has, named anywhere in the text, beats what the
+            # model read off a letterhead - and the tag kernel is keyed on that name.
+            listed = self.paperless.correspondent_from_text(ocr_excerpt)
+            sender_rule = bool(listed) and normalize_name(listed) != normalize_name(
+                result.correspondent
+            )
+            if sender_rule:
+                logger.info(
+                    "Correspondent rule applied for document %s: %s instead of the "
+                    "model's %s.",
+                    document_id,
+                    listed,
+                    result.correspondent,
+                )
+                result.correspondent = listed
+
             # Before the title is built: the correspondent is a title component.
             result.correspondent = to_display_case(result.correspondent)
             applied_rule = apply_tax_authority_type_rule(result)
@@ -443,6 +460,12 @@ class DocumentClassifier:
                     document_id,
                 )
                 reason = f"{reason} | Regel: Finanzamt => Steuer".strip(" |")
+
+            if sender_rule:
+                reason = (
+                    f"{reason} | Regel: Absender aus deinem Bestand, "
+                    "er steht im Text"
+                ).strip(" |")
 
             if not validation.valid:
                 return self._store_review(
