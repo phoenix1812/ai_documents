@@ -704,6 +704,11 @@ Dockerfile-Bild gesetzt.
 └── P0_README.md
 ```
 
+Die drei Speicher des Stacks liegen als Verzeichnisse im Projekt und werden per
+Bind-Mount in den Container gehaengt: `paperless-media/` (Originaldateien und
+Thumbnails), `paperless-data/` (Paperless-eigene Daten, Coranto, Figuren) und
+`data/` bzw. `data/postgres/` (SQLite des AI-Workers, PostgreSQL-Cluster).
+
 ## Sicherheit und Betrieb
 
 - `PAPERLESS_TOKEN` und `.env` niemals committen (`.gitignore` deckt `.env` ab)
@@ -733,6 +738,20 @@ Dockerfile-Bild gesetzt.
   ID gegen SQLite. Ab einigen tausend Dokumenten ist das alle zehn Minuten spuerbar.
 - Das konfigurierte Ollama-Modell ist Bestandteil des Readiness-Checks.
 - Fuer NAS/SMB/NFS-Consume-Pfade wird Paperless v3 mit Polling betrieben.
+- **Medien, Paperless-Daten und Postgres liegen lokal im Projekt**
+  (`PAPERLESS_MEDIA_PATH=./paperless-media`, umgestellt am 2026-10-01). Die
+  Primärkopie ist damit der Rechner, nicht das NAS: `scripts/backup.sh` tarnt
+  die Medien aus diesem lokalen Bestand, und Paperless schreibt neue Scans dort
+  hinein.
+- Die Kopie unter `/Volumes/homes/waldi/Drive/Dokumente/paperless/media` ist der
+  eingefrorene Stand vom Umzugstag und wird **bewusst nicht gespiegelt** – kein
+  Sync-Job, keine Spiegelung, kein Cron. Sie ist identisch zum lokalen Bestand
+  (220 Dokumentdateien; die 20 zusaetzlichen `.smbdelete*`-Marker auf dem NAS
+  zaehlen nicht als Inhalte). Wer sie als Backup ansehen will, muss sich dessen
+  bewusst sein: ab dem Umzugstag fehlt dort alles Neue.
+- Die folgenden Mount-Regeln gelten weiter fuer jeden Pfad, der noch auf eine
+  Freigabe zeigt (Consume-Verzeichnis), und fuer jeden Fall, in dem Medien
+  zurueck auf das NAS gelegt werden.
 - **Netzwerk-Mounts fuer `PAPERLESS_MEDIA_PATH`/`PAPERLESS_DATA_PATH` nur per SMB,
   nie per AFP.** Docker Desktop kann einem AFP-Mount nicht in den Mountpoint
   folgen: Der Bind existiert im Container, zeigt aber ein leeres Verzeichnis,
@@ -764,7 +783,8 @@ Dockerfile-Bild gesetzt.
   `Operation not permitted`. Geholfen hat nur ein Neustart von Docker Desktop.
   Reihenfolge ist also: mounten (macht das LaunchAgent), dann Docker starten.
 - `scripts/healthcheck.sh` meldet Protokoll und vergleicht die Dateizahl von Host
-  und Container; geloeschte Netzwerkdateien hinterlassen dabei
+  und Container; bei einem lokalen Pfad steht als Protokoll „lokal" und der
+  Vergleich prueft nur noch den Bind-Mount. Geloeschte Netzwerkdateien hinterlassen dabei
   `.smbdelete*`/`.afpDeleted*`-Marker, die auf beiden Seiten ausgeblendet werden -
   sonst vergleicht man Muell statt Medien. Bei „Host > 0, Container = 0" ist die
   Freigabe schuld, nicht die Anwendung.
