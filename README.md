@@ -699,15 +699,14 @@ Dockerfile-Bild gesetzt.
 ├── .dockerignore
 ├── requirements.txt
 ├── requirements-dev.txt
-├── .env.example
-├── GO_LIVE.md
-└── P0_README.md
+└── .env.example
 ```
 
-Die drei Speicher des Stacks liegen als Verzeichnisse im Projekt und werden per
-Bind-Mount in den Container gehaengt: `paperless-media/` (Originaldateien und
-Thumbnails), `paperless-data/` (Paperless-eigene Daten, Coranto, Figuren) und
-`data/` bzw. `data/postgres/` (SQLite des AI-Workers, PostgreSQL-Cluster).
+Die Speicher des Stacks liegen als Verzeichnisse im Projekt und werden per
+Bind-Mount in den Container gehaengt: `paperless-media/` (Originaldateien,
+Archiv-PDFs und Thumbnails), `paperless-data/` (Suchindex unter `index/`,
+Paperless-Logs unter `log/`) und `data/` bzw. `data/postgres/` (SQLite des
+AI-Workers, PostgreSQL-Cluster). Keines davon ist im Repository getrackt.
 
 ## Sicherheit und Betrieb
 
@@ -806,8 +805,11 @@ Thumbnails), `paperless-data/` (Paperless-eigene Daten, Coranto, Figuren) und
   ein Abbruch mitten im Restore waer schlechter als zurueckbleibender Muell.
 - Gespeicherte Review-Entscheidungen werden noch nicht automatisch in Prompts
   oder Regeln zurueckgespielt.
-- Die Umgebungsvariablen `EXPORT_PATH` und `POLL_INTERVAL` (und damit ein
-  Export-Zweig aus frueheren Versionen) sind Altlasten ohne Bezug zum aktuellen
-  Codepfad; `app/exporter.py` wurde entfernt. Die Verzeichnisse `export/`,
-  `exports/` und `paperless-export/` koennen alte Artefakte enthalten und werden
-  vom Stack nicht mehr geschrieben.
+- Der Export-Zweig frueherer Versionen ist raus: `app/exporter.py` ebenso wie die
+  Umgebungsvariablen `EXPORT_PATH` und `POLL_INTERVAL` haben nirgends mehr ein
+  Vorkommen (geprueft am 2026-10-01 gegen `app/`, `.env`, `.env.example`,
+  `docker-compose.yml` und `scripts/`). Die Verzeichnisse `export/`, `exports/` und
+  `paperless-export/` sind damit entfernt. Zwei Alt-Scans vom 2026-05-13, die von
+  der laufenden Datenbank nicht referenziert werden und deren Bytes es sonst
+  nirgends gibt, liegen als Einzelnachweis unter `legacy-scans/` (ignoriert,
+  nicht committen).
