@@ -60,7 +60,7 @@ app/classifier.py
   |
   +--> Paperless API: Dokument, OCR und PDF-Bytes laden
   +--> PDF-Hash und OCR-Hash pruefen
-  +--> Ollama: OCR-Kontext klassifizieren
+  +--> app/proposal_source.py: Vorschlag (ollama oder rules)
   +--> classifier.py: finalen Titel bauen
   +--> validator.py: Ergebnis pruefen
   +--> Paperless API: Metadaten aktualisieren
@@ -81,7 +81,9 @@ bleiben Ollama-Aufrufe zentral serialisiert.
 `GET /health`, `GET /live` und `GET /ready` liefert `app/health.py`. `/ready` ist
 der einzige Endpoint, der den Stack als ganzes bewertet (Paperless, Ollama-
 Modell, SQLite-Integritaet, Queue-Integritaet) und damit der Docker-Healthcheck
-ist. Healthchecks veraendern bewusst keinen Queue-Zustand.
+ist. Das Ollama-Modell zaehlt nur bei `PROPOSAL_SOURCE=ollama`; im Regeln-Modus
+gilt die Abhaengigkeit als `not_configured` und ist erfuellts. Healthchecks
+veraendern bewusst keinen Queue-Zustand.
 
 ## Services
 
@@ -90,7 +92,7 @@ ist. Healthchecks veraendern bewusst keinen Queue-Zustand.
 | `paperless` | Paperless Web UI und API | `127.0.0.1:8000` |
 | `ai-worker` | Trigger-Server, Queue-Verarbeitung, Health/Ready | `8080` nur im Docker-Netz, nicht publiziert |
 | `ai-review-ui` | Review-UI fuer Status, Korrektur und Reprocess | `127.0.0.1:8090` |
-| `ollama` | Lokales LLM | `11434` nur im Docker-Netz |
+| `ollama` | Lokales LLM, nur bei `PROPOSAL_SOURCE=ollama` | `11434` nur im Docker-Netz |
 | `db` | PostgreSQL fuer Paperless | intern |
 | `redis` | Redis fuer Paperless | intern |
 
@@ -527,6 +529,67 @@ frei und protokolliert ihn als „Manuell freigegeben".
 Annehmen lehnt mit HTTP 400 ab, wenn sich Absender, Typ oder Tags unterscheiden -
 sonst waere der Knopf ein Weg, den Grund zu umgehen, aus dem die Regeln entstehen.
 
+## Regeln statt Modell (PROPOSAL_SOURCE)
+
+Der Vorschlag, den die Review-UI zeigt, kommt aus einer austauschbaren Quelle
+(`app/proposal_source.py`). `PROPOSAL_SOURCE=ollama` (Standard) laesst gemma3
+klassifizieren, `PROPOSAL_SOURCE=rules` schlaegt stattdessen nur aus den
+gelernten Regeln vor. Der Worker baut die Quelle einmal im Konstruktor
+(`app/classifier.py:209`) und ruft sie an einer Stelle (`app/classifier.py:394`)
+auf; alles danach - Steuer-Regel, Kern-Tags, Titelbau, Validierung,
+`NEEDS_REVIEW` statt Auto-Approval, Annehmen und Speichern - bleibt unangetastet
+und ist bewusst nicht an das Modell gekoppelt.
+
+Die Regeln-Quelle (`RulesProposalSource`, `app/proposal_source.py:57`) nutzt
+ausschliesslich Bestandsdaten:
+
+- **Absender** aus `correspondent_from_text` im Briefkopf, Aufloesung auf den
+  kanonischen Paperless-Namen und `to_display_case` - ohne Raten.
+- **Dokumenttyp** aus `type_kernel` (`app/db.py:776`): dem einigen Typen, den du
+  fuer diesen Absender freigegeben hast. Zwei verschiedene Typen ergeben keinen
+  Vorschlag, keinen Tipp und keinen Platzhalter.
+- **Datum** aus dem Paperless-Feld `created` (`PROPOSAL_DATE_SOURCE`), weil ohne
+  Modell niemand das Datum aus dem Text liest.
+- **Tags** weiterhin durch den bestaetigten Kern, nicht durch die Quelle.
+
+Gemessen am echten Bestand (76 Dokumente, Wegwerf-Snapshot der Worker-DB,
+Vorhersage jeweils ohne das aktuelle Dokument):
+
+| | Out-of-Sample | In-Sample |
+| --- | --- | --- |
+| Absender korrekt | 56/76 (20 ohne Regel, 0 falsch) | 65/76 (11 offen, 0 falsch) |
+| Dokumenttyp korrekt | 41/76 (2 falsch) | 50/76 |
+| Kern-Tags exakt | 26 | 34 |
+
+Die beiden falschen Typen sind Erstbegegnungen einer Minderheitsart; danach
+liefert die Regel fuer diesen Absender gar keinen Typ mehr, sondern uebergibt
+die Entscheidung. Deshalb ist der Modus nicht „genauer, aber stumm", sondern
+„stummer, aber nie falsch".
+
+Auto-Approval gibt es in diesem Modus zunaechst nicht: `RULES_CONFIDENCE_MATCHING`
+ist mit `0.85` unter `CONFIDENCE_THRESHOLD=0.90` angesetzt, alle Vorschlaege
+landen in der Review-UI. Bei `0.92` waeren 43 von 76 automatisch gueltig - eine
+Entscheidung, die du selbst ueber die Schwelle triffst, nicht der Code.
+
+Zwei Folgen fuer die Titel: ohne Modell faellt `subject` weg, und `created`
+weicht bei 14/76 vom Datum ab, das das Modell gelesen hatte. Von den bestehenden
+Namen ist deshalb keiner identisch (39/76 treffen immerhin das Praefix). Jeder
+Titel, der dir fehlt, ist ein Klick auf „Titel aus Feldern neu bauen" - oder ein
+Grund, im Standardmodus zu bleiben.
+
+Ohne Modell darf der Worker nicht von Ollama abhaengig sein. `app/health.py:58`
+meldet `not_configured` statt eines Fehlers, wenn `PROPOSAL_SOURCE=rules` steht,
+und `/ready` bleibt 200. Den `ollama`-Service und seinen `depends_on`-Eintrag aus
+`docker-compose.yml` kannst du erst in diesem Modus entfernen - das ist ein
+Compose-Eingriff und bleibt bei dir.
+
+`TYPE_EVIDENCE_REQUIRED=model_only` entschlaerft die Typ-Belege (Betrag,
+Rechnungsnummer, Vertragsgegenstand), die der Validator aus dem OCR-Text
+verlangt (`app/validator.py:260`): ohne Modell extrahiert sie niemand, also
+wuerde jeder Regeln-Vorschlag an einem Beleg scheitern, den er per Definition
+nicht liefern kann. Die Pruefung laeuft dann nur im Modellmodus. Die Tag-Pruefungen
+(Kern-Abweichung, unbekannter Tag) sind davon nicht betroffen.
+
 ## Konfiguration
 
 Wichtige Variablen:
@@ -541,6 +604,11 @@ Wichtige Variablen:
 | `OLLAMA_MODEL` | Modellname fuer Klassifikation und Readiness-Check |
 | `OLLAMA_NUM_CTX` | Kontextfenster pro Klassifikation, Standard `8192` |
 | `OCR_MAX_CHARS` | OCR-Zeichen im Prompt; leer leitet den Wert aus `OLLAMA_NUM_CTX` ab |
+| `PROPOSAL_SOURCE` | `ollama` (Standard) = Modell schlaegt vor, `rules` = nur gelernte Regeln |
+| `RULES_CONFIDENCE_MATCHING` | Vertrauen in `rules`-Vorschlaege, wenn Absender und Typ feststehen, Standard `0.85` |
+| `RULES_CONFIDENCE_PARTIAL` | Vertrauen, wenn nur einer der beiden feststeht, Standard `0.80` |
+| `PROPOSAL_DATE_SOURCE` | `paperless_created` (Standard) setzt das Titel-Datum aus Paperless, `none` laesst es weg |
+| `TYPE_EVIDENCE_REQUIRED` | `always` (Standard) verlangt Belege im Text, `model_only` prueft nur bei `PROPOSAL_SOURCE=ollama` |
 | `DB_PATH` | Verzeichnis fuer `documents.db` |
 | `AI_WORKER_TRIGGER_URL` | Queue-Trigger des AI-Workers |
 | `TRIGGER_PORT` | Port des Trigger-Servers, im Compose-Setup `8080` |
@@ -672,6 +740,7 @@ Dockerfile-Bild gesetzt.
 │   ├── models.py             # Datenmodell der Klassifikation
 │   ├── prompts.py            # Ollama-Prompts
 │   ├── ollama_client.py      # Ollama-Aufrufe
+│   ├── proposal_source.py    # Vorschlagsquelle: Modell oder gelernte Regeln (PROPOSAL_SOURCE)
 │   ├── paperless_client.py   # Paperless-API-Client
 │   ├── validator.py          # Prueft Ergebnisse vor Auto-Apply
 │   ├── db.py                 # documents-, review_decisions- und app_meta-Tabelle

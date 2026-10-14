@@ -773,6 +773,44 @@ class Database:
             return None
         return list(distinct.pop()), len(approved)
 
+    def type_kernel(self, correspondent: str | None) -> tuple[str | None, int, int]:
+        """The document type he approved for this sender, plus support and spread.
+
+        Same contract as tag_kernel: exactly one distinct type is a decision he
+        already made, several types are an open question and return None instead
+        of a guess. The counts tell the caller why it stayed open - how many of
+        his documents carry a type for this sender, and how many distinct types.
+        """
+
+        wanted = normalize_name(correspondent)
+        if not wanted:
+            return None, 0, 0
+
+        latest: dict[int, sqlite3.Row] = {}
+        for row in self.conn.execute(
+            """
+            SELECT paperless_id, final_correspondent, final_document_type
+            FROM review_decisions
+            ORDER BY id
+            """
+        ).fetchall():
+            latest[int(row["paperless_id"])] = row
+
+        approved: list[str] = []
+        for row in latest.values():
+            if normalize_name(row["final_correspondent"]) != wanted:
+                continue
+            document_type = (row["final_document_type"] or "").strip()
+            if document_type:
+                approved.append(document_type)
+
+        distinct = {name.casefold() for name in approved}
+        if len(distinct) != 1:
+            return None, len(approved), len(distinct)
+
+        # The spelling of his own approval, so the Paperless lookup matches it.
+        return approved[0], len(approved), 1
+
     def integrity_check(self) -> str:
         row = self.conn.execute("PRAGMA integrity_check").fetchone()
         if row is None:

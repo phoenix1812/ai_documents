@@ -36,7 +36,7 @@ services:
       start_period: 30s
 
   paperless:
-    image: ${PAPERLESS_IMAGE:-ghcr.io/paperless-ngx/paperless-ngx:3.1.3}
+    image: ${PAPERLESS_IMAGE:-ghcr.io/paperless-ngx/paperless-ngx:3.3.1}
     container_name: paperless
     restart: unless-stopped
     depends_on:
@@ -95,6 +95,13 @@ services:
       PAPERLESS_URL: http://paperless:8000
       PAPERLESS_PUBLIC_URL: ${PAPERLESS_PUBLIC_URL:-http://localhost:8000}
       TRIGGER_PORT: 8080
+      # Proposal source. With "rules" the worker neither calls nor needs the
+      # ollama service; the service can then be removed from this file.
+      PROPOSAL_SOURCE: ${PROPOSAL_SOURCE:-ollama}
+      PROPOSAL_DATE_SOURCE: ${PROPOSAL_DATE_SOURCE:-paperless_created}
+      TYPE_EVIDENCE_REQUIRED: ${TYPE_EVIDENCE_REQUIRED:-always}
+      RULES_CONFIDENCE_MATCHING: ${RULES_CONFIDENCE_MATCHING:-0.85}
+      RULES_CONFIDENCE_PARTIAL: ${RULES_CONFIDENCE_PARTIAL:-0.80}
     volumes:
       - ./data:/data
     healthcheck:

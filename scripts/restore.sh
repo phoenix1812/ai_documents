@@ -81,6 +81,28 @@ restore_archive "$BACKUP_DIR/paperless-media.tar.gz" "$PAPERLESS_MEDIA_PATH"
 restore_archive "$BACKUP_DIR/ai-data.tar.gz" "$AI_DATA_PATH" \
   --exclude="$(basename "$AI_DATA_PATH")/$(basename "$POSTGRES_DATA_PATH")"
 
+# Neue Archive enthalten keine live SQLite-Dateien mehr, sondern WAL-sichere
+# Snapshots. Alte Archive (vor 2026-10) haben die dateien noch im Tar; dort
+# bleibt der Weg ueber das Archiv, nur die Rest-WAL wird entfernt.
+if [ -d "$BACKUP_DIR/sqlite" ]; then
+  echo "➡️  Setze SQLite-Snapshots ein"
+  mkdir -p "$AI_DATA_PATH/queue.db"
+  for pair in "documents.db:$AI_DATA_PATH/documents.db" \
+              "queue-documents.db:$AI_DATA_PATH/queue.db/documents.db"; do
+    src="$BACKUP_DIR/sqlite/${pair%%:*}"
+    dst="${pair#*:}"
+    [ -f "$src" ] || { echo "ℹ️  Snapshot fehlt im Archiv, uebersprungen: $(basename "$src")"; continue; }
+    rm -f -- "$dst-wal" "$dst-shm"
+    mv "$src" "$dst"
+    chmod 644 "$dst"
+    echo "ℹ️  $dst wiederhergestellt ($(wc -c < "$dst" | tr -d ' ') Bytes)"
+  done
+else
+  echo "ℹ️  Archiv ohne sqlite/-Ordner (aelter): SQLite-Daten kommen aus dem Tar, Rest-WAL wird entfernt."
+  rm -f -- "$AI_DATA_PATH/documents.db-wal" "$AI_DATA_PATH/documents.db-shm" \
+          "$AI_DATA_PATH/queue.db/documents.db-wal" "$AI_DATA_PATH/queue.db/documents.db-shm"
+fi
+
 echo "➡️  Starte PostgreSQL"
 docker compose up -d db
 

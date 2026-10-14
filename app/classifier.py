@@ -25,10 +25,11 @@ from app.db import STATUS_SKIPPED_DUPLICATE
 from app.hash_store import ocr_sha256
 from app.hash_store import sha256
 from app.models import ClassificationResult
-from app.ollama_client import OllamaClient
 from app.paperless_client import PaperlessClient
 from app.paperless_client import normalize_name
 from app.paperless_client import to_display_case
+from app.proposal_source import ProposalRequest
+from app.proposal_source import build_proposal_source
 from app.validator import apply_tax_authority_type_rule
 from app.validator import validate_classification
 
@@ -204,8 +205,8 @@ def clean_paperless_tags(tags: list[str] | None) -> list[str]:
 class DocumentClassifier:
     def __init__(self) -> None:
         self.paperless = PaperlessClient()
-        self.ollama = OllamaClient()
         self.db = Database(settings.db_path)
+        self.source = build_proposal_source(self.paperless, self.db)
 
     def _store_review(
         self,
@@ -390,7 +391,14 @@ class DocumentClassifier:
                 )
 
             try:
-                result = self.ollama.classify(content)
+                result = self.source.classify(
+                    ProposalRequest(
+                        document_id=document_id,
+                        content=content,
+                        ocr_excerpt=ocr_excerpt,
+                        document=document,
+                    )
+                )
             except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
                 self.db.insert_document(
                     paperless_id=document_id,

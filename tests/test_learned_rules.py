@@ -436,8 +436,8 @@ def test_the_rule_rewrites_the_title_before_paperless_sees_it(tmp_path, monkeypa
         correspondent_from_text=lambda text: None,
         resolve_correspondent_name=lambda name: None,
     )
-    classifier.ollama = SimpleNamespace(
-        classify=lambda content: ClassificationResult(
+    classifier.source = SimpleNamespace(
+        classify=lambda request: ClassificationResult(
             document_type="Rechnung",
             correspondent="Finanzamt Erkelenz",
             title="unbenannt",
@@ -511,8 +511,8 @@ def test_the_classifier_stores_the_shouted_sender_in_nice_case(
         correspondent_from_text=lambda text: None,
         resolve_correspondent_name=lambda name: None,
     )
-    classifier.ollama = SimpleNamespace(
-        classify=lambda content: ClassificationResult(
+    classifier.source = SimpleNamespace(
+        classify=lambda request: ClassificationResult(
             document_type="Steuer",
             correspondent="STADT HÜCKELHOVEN",
             title="unbenannt",
@@ -602,8 +602,8 @@ def _classifier(
         correspondent_from_text=lambda text: listed,
         resolve_correspondent_name=resolve,
     )
-    classifier.ollama = SimpleNamespace(
-        classify=lambda content: ClassificationResult(
+    classifier.source = SimpleNamespace(
+        classify=lambda request: ClassificationResult(
             document_type=document_type,
             correspondent=model_sender,
             title="unbenannt",

@@ -27,6 +27,31 @@ class Settings:
         self.ollama_url = os.getenv("OLLAMA_URL", "http://ollama:11434").rstrip("/")
         self.ollama_num_ctx = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
 
+        # Who proposes the classification: the model or his own rules. Everything
+        # downstream (sender rules, title, validator, review queue) is the same.
+        self.proposal_source = os.getenv("PROPOSAL_SOURCE", "ollama").strip().lower()
+
+        # Rules-only proposer: confidence is derived from which signals agreed,
+        # so CONFIDENCE_THRESHOLD decides whether a document is auto-approved.
+        self.rules_confidence_matching = float(
+            os.getenv("RULES_CONFIDENCE_MATCHING", "0.85")
+        )
+        self.rules_confidence_partial = float(
+            os.getenv("RULES_CONFIDENCE_PARTIAL", "0.80")
+        )
+
+        # Date component of the generated title. Paperless parses a date while
+        # consuming, so its value is available without a model.
+        self.proposal_date_source = os.getenv(
+            "PROPOSAL_DATE_SOURCE", "paperless_created"
+        ).strip().lower()
+
+        # "always" keeps the type-specific evidence checks; "model_only" skips the
+        # checks whose fields only a model can read out of the text.
+        self.type_evidence_required = os.getenv(
+            "TYPE_EVIDENCE_REQUIRED", "always"
+        ).strip().lower()
+
         # Optional override. Without it the OCR budget is derived from the window.
         self.ocr_max_chars = int(os.getenv("OCR_MAX_CHARS", "0"))
 
@@ -80,6 +105,10 @@ class Settings:
         self.healthcheck_timeout_seconds = int(
             os.getenv("HEALTHCHECK_TIMEOUT_SECONDS", "3")
         )
+
+    @property
+    def uses_model(self) -> bool:
+        return self.proposal_source == "ollama"
 
     @property
     def ocr_context_chars(self) -> int:

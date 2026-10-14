@@ -51,13 +51,19 @@ def check_health() -> dict[str, Any]:
 
     try:
         paperless = _http_check(settings.paperless_healthcheck_url)
-        ollama = _ollama_check()
+        # A rules-only deployment has no model to reach: keeping this check on
+        # would hold /ready at 503 for a dependency that is gone by design.
+        ollama = (
+            _ollama_check()
+            if settings.uses_model
+            else {"status": "not_configured", "model": None}
+        )
         db_integrity = db.integrity_check()
         queue_integrity = queue_store.integrity_check()
 
         dependencies_ok = (
             paperless["status"] == "ok"
-            and ollama["status"] == "ok"
+            and ollama["status"] in {"ok", "not_configured"}
             and db_integrity == "ok"
             and queue_integrity == "ok"
         )
