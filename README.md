@@ -92,12 +92,16 @@ veraendern bewusst keinen Queue-Zustand.
 | `paperless` | Paperless Web UI und API | `127.0.0.1:8000` |
 | `ai-worker` | Trigger-Server, Queue-Verarbeitung, Health/Ready | `8080` nur im Docker-Netz, nicht publiziert |
 | `ai-review-ui` | Review-UI fuer Status, Korrektur und Reprocess | `127.0.0.1:8090` |
-| `ollama` | Lokales LLM, nur bei `PROPOSAL_SOURCE=ollama` | `11434` nur im Docker-Netz |
 | `db` | PostgreSQL fuer Paperless | intern |
 | `redis` | Redis fuer Paperless | intern |
 
 `ai-worker` und `ai-review-ui` werden aus demselben Image gebaut (`dockerfile`);
 `.dockerignore` haelt Secrets, `.env` und Datenverzeichnisse daraus fern.
+
+Ein `ollama`-Service gehoert seit 2026-10-14 nicht mehr zum Stack (`PROPOSAL_SOURCE=
+rules`). Fuer den Modellbetrieb muesste er wieder in `docker-compose.yml` stehen;
+`scripts/ensure-ollama-model.sh` setzt ihn per `docker compose up -d ollama` voraus
+und funktioniert erst dann wieder.
 
 ## Einrichtung
 
@@ -140,7 +144,8 @@ aktuellen Code nicht mehr gelesen und haben keine Entsprechung mehr in
 scripts/check-env.sh
 ```
 
-4. Gewuenschtes Ollama-Modell laden:
+4. Gewuenschtes Ollama-Modell laden — nur fuer den Modellbetrieb
+   (`PROPOSAL_SOURCE=ollama`); der Dienst ist im aktuellen Stack nicht mehr enthalten:
 
 ```bash
 scripts/ensure-ollama-model.sh
@@ -579,9 +584,11 @@ Grund, im Standardmodus zu bleiben.
 
 Ohne Modell darf der Worker nicht von Ollama abhaengig sein. `app/health.py:58`
 meldet `not_configured` statt eines Fehlers, wenn `PROPOSAL_SOURCE=rules` steht,
-und `/ready` bleibt 200. Den `ollama`-Service und seinen `depends_on`-Eintrag aus
-`docker-compose.yml` kannst du erst in diesem Modus entfernen - das ist ein
-Compose-Eingriff und bleibt bei dir.
+und `/ready` bleibt 200. Seit 2026-10-14 ist der `ollama`-Service samt
+`depends_on` aus `docker-compose.yml` entfernt; der Modellbetrieb braucht ihn
+wieder darin. Das Modell selbst liegt weiter auf der Platte (`./ollama`, 3,1 GB),
+also ist der Rueckweg ein Compose-Nachtrag plus `PROPOSAL_SOURCE=ollama` ohne
+erneuten Download.
 
 `TYPE_EVIDENCE_REQUIRED=model_only` entschlaerft die Typ-Belege (Betrag,
 Rechnungsnummer, Vertragsgegenstand), die der Validator aus dem OCR-Text

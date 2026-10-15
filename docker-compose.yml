@@ -22,19 +22,6 @@ services:
       timeout: 5s
       retries: 10
 
-  ollama:
-    image: ${OLLAMA_IMAGE:-ollama/ollama:0.34.0}
-    container_name: ollama
-    restart: unless-stopped
-    volumes:
-      - ./ollama:/root/.ollama
-    healthcheck:
-      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
-
   paperless:
     image: ${PAPERLESS_IMAGE:-ghcr.io/paperless-ngx/paperless-ngx:3.3.1}
     container_name: paperless
@@ -86,8 +73,6 @@ services:
     build: .
     container_name: ai-worker
     restart: unless-stopped
-    depends_on:
-      - ollama
     env_file:
       - .env
     environment:
@@ -95,8 +80,8 @@ services:
       PAPERLESS_URL: http://paperless:8000
       PAPERLESS_PUBLIC_URL: ${PAPERLESS_PUBLIC_URL:-http://localhost:8000}
       TRIGGER_PORT: 8080
-      # Proposal source. With "rules" the worker neither calls nor needs the
-      # ollama service; the service can then be removed from this file.
+      # Proposal source. The ollama service was removed from this file on
+      # 2026-10-14; PROPOSAL_SOURCE=ollama only works after adding it back.
       PROPOSAL_SOURCE: ${PROPOSAL_SOURCE:-ollama}
       PROPOSAL_DATE_SOURCE: ${PROPOSAL_DATE_SOURCE:-paperless_created}
       TYPE_EVIDENCE_REQUIRED: ${TYPE_EVIDENCE_REQUIRED:-always}
