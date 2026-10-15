@@ -30,6 +30,8 @@ Paperless bleibt die Single Source of Truth. PDFs werden nicht separat exportier
 - Review-UI fuer unsichere, fehlgeschlagene und manuell zu pruefende Dokumente
 - Retry und Reprocess ueber denselben Queue-Trigger wie Paperless
 - Duplikaterkennung per PDF-SHA256
+- Duplikate aus der Review-UI loeschen: Zwei-Stufen-Bestaetigung, erst Paperless,
+  dann die SQLite-Zeile
 - Wahrscheinliche Duplikaterkennung per normalisiertem OCR-SHA256
 - SQLite-Audit fuer Status, Fehler, Review-Entscheidungen und Korrekturen
 - Docker-Compose-Setup mit Paperless, PostgreSQL, Redis, Ollama, AI-Worker und Review-UI
@@ -375,10 +377,23 @@ ist:
 
 In der Review-UI zeigt „Alle Dokumente" bei solchen Zeilen zusaetzlich
 `Duplikat von #38` als Link auf das Original, und der Statusfilter
-`SKIPPED_DUPLICATE` listet alle Funde auf, um sie selbst zu loeschen.
-Loeschen bleibt Handarbeit. Im Dry-Run unterbleibt der Schreibzugriff auf
-Paperless; ein fehlgeschlagenes Markieren macht aus dem `SKIPPED_DUPLICATE`
-keinen Fehler, sondern steht in der Fehlermeldung der Zeile.
+`SKIPPED_DUPLICATE` listet alle Funde auf. Ueber „Duplikat loeschen" (Liste oder
+Detailseite) laufen zwei Stufen: eine Bestaetigungsseite nennt Paperless-ID, Titel,
+Original-Referenz und die Anzahl der Entscheidungszeilen, erst das zweite Formular
+loescht. Geloescht wird immer in dieser Reihenfolge - zuerst das Dokument in
+Paperless, dann die SQLite-Zeile samt ihrer `review_decisions`. Blaeme die
+Paperless-Loeschung, bleibt die Zeile stehen; eine Zeile ohne Dokument in Paperless
+wuerde der Reconciler (`app/reconcile_missing.py`) als neues Dokument einreihen.
+Erreichbar sind nur Zeilen mit `SKIPPED_DUPLICATE`: die Statuspruefung sitzt in der
+SQL der Loeschung (`app/db.py`), nicht nur im Aufrufer, und ein Original bleibt
+unveraendert. Der Paperless-DELETE ist ein Weich-Delete: das Dokument liegt im
+Papierkorb (`deleted_at`, Wiederherstellung ueber die Paperless-Oberflaeche), bis der
+geplante Leerungslauf `documents.tasks.empty_trash` es nach `EMPTY_TRASH_DELAY`
+(Vorgabe 30 Tage) endgueltig samt Datei entfernt. Geloeschte Dokumente tauchen in
+`/api/documents/` nicht mehr auf, der Reconciler sieht sie also nicht. Die Aktion ist
+ein ausdruecklicher Eingriff und haengt nicht an `DRY_RUN` – das betrifft nur die
+automatische Pipeline. Ein fehlgeschlagenes Markieren macht aus dem
+`SKIPPED_DUPLICATE` keinen Fehler, sondern steht in der Fehlermeldung der Zeile.
 
 ## Titel-Format
 

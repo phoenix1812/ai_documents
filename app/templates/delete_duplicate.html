@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Duplikat {{ item.paperless_id }} löschen · AI Documents{% endblock %}
+
+{% block content %}
+<section class="panel">
+    <h1>Duplikat löschen</h1>
+
+    <p class="notice">
+        Paperless legt das Duplikat in den Papierkorb; von dort ist es wiederherstellbar,
+        bis der Leerungslauf es endgültig entfernt (PAPERLESS_EMPTY_TRASH_DELAY,
+        Vorgabe 30 Tage). Die Zeile in dieser Datenbank ist sofort weg. Das Original
+        bleibt unverändert.
+    </p>
+
+    <dl class="detail-grid single">
+        <div>
+            <dt>Paperless-ID</dt>
+            <dd>{{ item.paperless_id }}</dd>
+        </div>
+        <div>
+            <dt>DB-ID</dt>
+            <dd>{{ item.id }}</dd>
+        </div>
+        <div>
+            <dt>Titel in Paperless</dt>
+            <dd>{{ paperless_title or "nicht ermittelbar" }}</dd>
+        </div>
+        <div>
+            <dt>Duplikat von</dt>
+            <dd>
+                {% if item.duplicate_of_paperless_id %}
+                    <a href="{{ item.duplicate_of_url }}" target="_blank" rel="noopener noreferrer">
+                        #{{ item.duplicate_of_paperless_id }}
+                    </a>
+                {% else %}
+                    —
+                {% endif %}
+            </dd>
+        </div>
+        <div>
+            <dt>Erkannt durch</dt>
+            <dd>{{ preview.duplicate_reason or item.duplicate_reason or "—" }}</dd>
+        </div>
+        <div>
+            <dt>Entscheidungszeilen zu diesem Eintrag</dt>
+            <dd>{{ preview.decision_count }}</dd>
+        </div>
+    </dl>
+
+    {% if paperless_note %}
+        <p class="notice">{{ paperless_note }}</p>
+    {% endif %}
+
+    <div class="row-actions">
+        <form method="post" action="/items/{{ item.id }}/delete-duplicate">
+            <button class="button danger" type="submit">
+                Duplikat in Paperless und Datenbank löschen
+            </button>
+        </form>
+        <a class="button secondary" href="/items/{{ item.id }}">Abbrechen</a>
+    </div>
+</section>
+{% endblock %}

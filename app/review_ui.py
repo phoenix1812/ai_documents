@@ -15,6 +15,7 @@ Includes:
 import secrets
 from typing import Any
 
+import requests
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -86,6 +87,18 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 
 DEFAULT_CORRECTION_REASON = "Manuelle Korrektur"
+
+DELETE_NOTICES = {"geloescht", "bereits-entfernt"}
+
+DELETE_UNREACHABLE_NOTE = (
+    "Paperless antwortet nicht auf dieses Dokument. Das Loeschen bricht in diesem "
+    "Fall ab, die Zeile in dieser Datenbank bleibt erhalten."
+)
+DELETE_ALREADY_GONE_NOTE = (
+    "Das Dokument existiert nicht mehr in Paperless - zum Beispiel, weil du es dort "
+    "schon geloescht hast. Hier faellt nur die Zeile aus dieser Datenbank weg, ein "
+    "Schreibzugriff auf Paperless unterbleibt."
+)
 
 ALL_STATUS_FILTERS = (
     STATUS_AUTO_APPROVED,
@@ -225,6 +238,8 @@ def documents(
     request: Request,
     status: str | None = None,
     q: str | None = None,
+    notice: str | None = None,
+    pid: int | None = None,
 ):
     db = get_db()
 
@@ -244,6 +259,9 @@ def documents(
             "selected_status": status,
             "query": q or "",
             "status_filters": ALL_STATUS_FILTERS,
+            "duplicate_status": STATUS_SKIPPED_DUPLICATE,
+            "notice": notice if notice in DELETE_NOTICES else None,
+            "notice_pid": pid,
         },
     )
 
@@ -320,6 +338,7 @@ def detail(request: Request, item_id: int):
             "item": item,
             "approved_statuses": APPROVED_STATUSES,
             "review_statuses": REVIEW_STATUSES,
+            "duplicate_status": STATUS_SKIPPED_DUPLICATE,
         },
     )
 
@@ -534,6 +553,85 @@ def retry_failed(item_id: int):
     retry_failed_document(item_id)
 
     return RedirectResponse("/failed", status_code=303)
+
+
+def get_duplicate_or_404(item_id: int) -> dict[str, Any]:
+    """Only duplicates are reachable through the delete screens."""
+
+    item = get_item_or_404(item_id)
+
+    if item["status"] != STATUS_SKIPPED_DUPLICATE:
+        raise HTTPException(
+            status_code=400,
+            detail="Nur Duplikate koennen von hier geloescht werden",
+        )
+
+    return item
+
+
+@app.get("/items/{item_id}/delete-duplicate")
+def confirm_delete_duplicate(request: Request, item_id: int):
+    """First stage: show what the deletion would remove, and nothing else."""
+
+    item = get_duplicate_or_404(item_id)
+    preview = get_db().duplicate_delete_preview(item_id)
+
+    paperless_title = ""
+    paperless_note = ""
+    try:
+        document = PaperlessClient().get_document(int(item["paperless_id"]))
+        paperless_title = document.get("title") or document.get("file_name") or ""
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 404:
+            paperless_note = DELETE_ALREADY_GONE_NOTE
+        else:
+            paperless_note = DELETE_UNREACHABLE_NOTE
+    except requests.RequestException:
+        paperless_note = DELETE_UNREACHABLE_NOTE
+
+    return templates.TemplateResponse(
+        "delete_duplicate.html",
+        {
+            "request": request,
+            "item": item,
+            "preview": preview,
+            "paperless_title": paperless_title,
+            "paperless_note": paperless_note,
+        },
+    )
+
+
+@app.post("/items/{item_id}/delete-duplicate")
+def delete_duplicate(item_id: int):
+    """Second stage: Paperless first, then our own row.
+
+    The order is the safety property. A row deleted while its Paperless document
+    still exists would be re-queued as a brand new document by the reconciler.
+    """
+
+    item = get_duplicate_or_404(item_id)
+    paperless_id = int(item["paperless_id"])
+
+    try:
+        outcome = PaperlessClient().delete_document(paperless_id)
+    except requests.RequestException as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Paperless hat das Dokument nicht geloescht. Die Zeile in "
+                "documents.db bleibt erhalten, sonst wuerde der Reconciler das "
+                "Dokument als neu einreihen. "
+                f"Ausnahme: {exc}"
+            ),
+        ) from exc
+
+    get_db().delete_duplicate_row(item_id)
+
+    notice = "bereits-entfernt" if outcome == "bereits entfernt" else "geloescht"
+    return RedirectResponse(
+        f"/documents?status={STATUS_SKIPPED_DUPLICATE}&notice={notice}&pid={paperless_id}",
+        status_code=303,
+    )
 
 
 @app.get("/reprocess")

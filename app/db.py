@@ -610,6 +610,60 @@ class Database:
         if result.rowcount == 0:
             raise ValueError(f"Document DB row not found: {document_db_id}")
 
+    def duplicate_delete_preview(self, document_db_id: int) -> dict[str, Any] | None:
+        """What a duplicate deletion would remove, or None when it is not a duplicate.
+
+        Keyed on the DB row, not the Paperless id: rows can share a paperless_id and
+        an approved row must never be reachable through this path.
+        """
+
+        row = self.conn.execute(
+            """
+            SELECT id, paperless_id, title, original_title, duplicate_of_paperless_id,
+                   duplicate_reason, error_message, status
+            FROM documents
+            WHERE id = ? AND status = ?
+            """,
+            (document_db_id, STATUS_SKIPPED_DUPLICATE),
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        preview = self.row_to_dict(row)
+        preview["decision_count"] = self.conn.execute(
+            "SELECT COUNT(*) FROM review_decisions WHERE document_db_id = ?",
+            (document_db_id,),
+        ).fetchone()[0]
+        return preview
+
+    def delete_duplicate_row(self, document_db_id: int) -> tuple[int, int]:
+        """Remove a duplicate row and the review decisions that belong to it.
+
+        The status guard sits in the SQL instead of only in the caller, so an
+        approved row cannot be dropped through this path even by mistake.
+        """
+
+        exists = self.conn.execute(
+            "SELECT 1 FROM documents WHERE id = ? AND status = ?",
+            (document_db_id, STATUS_SKIPPED_DUPLICATE),
+        ).fetchone()
+
+        if exists is None:
+            raise ValueError(f"Keine Duplikat-Zeile mit DB-ID {document_db_id}")
+
+        decisions = self.conn.execute(
+            "DELETE FROM review_decisions WHERE document_db_id = ?",
+            (document_db_id,),
+        )
+        documents = self.conn.execute(
+            "DELETE FROM documents WHERE id = ? AND status = ?",
+            (document_db_id, STATUS_SKIPPED_DUPLICATE),
+        )
+        self.conn.commit()
+
+        return documents.rowcount, decisions.rowcount
+
     def dashboard_counts(self) -> dict[str, int]:
         rows = self.conn.execute(
             """

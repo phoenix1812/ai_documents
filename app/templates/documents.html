@@ -60,6 +60,12 @@
     </form>
   </section>
 
+  {% if notice %}
+    <p class="notice">
+      Duplikat #{{ notice_pid }} wurde in Paperless {{ notice }} und aus dieser Datenbank entfernt.
+    </p>
+  {% endif %}
+
   <section class="table-card">
     {% if not items %}
       <div class="empty-state">
@@ -116,7 +122,16 @@
                   </div>
                 </td>
                 <td><span class="confidence {{ item.confidence_class or '' }}">{{ item.confidence_display }}</span></td>
-                <td><a class="button small secondary" href="/items/{{ item.id }}">Bearbeiten</a></td>
+                <td>
+                    <a class="button small secondary" href="/items/{{ item.id }}">
+                        {% if item.status == duplicate_status %}Duplikat prüfen{% else %}Bearbeiten{% endif %}
+                    </a>
+                    {% if item.status == duplicate_status %}
+                        <a class="button small danger" href="/items/{{ item.id }}/delete-duplicate">
+                            Duplikat löschen
+                        </a>
+                    {% endif %}
+                </td>
               </tr>
             {% endfor %}
           </tbody>

@@ -117,6 +117,17 @@
             {% endif %}
         {% else %}
             <p class="notice">Dieser Eintrag ist nicht editierbar.</p>
+
+            {% if item.status == duplicate_status %}
+                <p>
+                    Duplikat von
+                    <a href="{{ item.duplicate_of_url }}" target="_blank" rel="noopener noreferrer">
+                        #{{ item.duplicate_of_paperless_id }}</a>.
+                </p>
+                <a class="button danger" href="/items/{{ item.id }}/delete-duplicate">
+                    Duplikat löschen
+                </a>
+            {% endif %}
         {% endif %}
     </section>
 </section>

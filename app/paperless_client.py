@@ -351,6 +351,26 @@ class PaperlessClient:
         )
         response.raise_for_status()
 
+    def delete_document(self, document_id: int) -> str:
+        """Delete the document itself in Paperless.
+
+        A document that is already gone is reported instead of raising: the caller
+        still wants its own row removed. Every other failure raises, because a
+        Paperless document without a row here would be re-queued as new by the
+        reconciler (app/reconcile_missing.py).
+        """
+        response = requests.delete(
+            self._url(f"/api/documents/{document_id}/"),
+            headers=self.headers,
+            timeout=30,
+        )
+
+        if response.status_code == 404:
+            return "bereits entfernt"
+
+        response.raise_for_status()
+        return "geloescht"
+
     def update_document_metadata_by_names(
         self,
         document_id: int,
