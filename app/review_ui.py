@@ -9,11 +9,14 @@ Includes:
 - editing approved documents
 - manual reprocess
 - review learning
+- evidence page (GET /evidence), its Paperless calls read-only
+- evidence judgements (POST /evidence/verdict), written to SQLite only
 - HTTP Basic Auth
 """
 
 import secrets
 from typing import Any
+from urllib.parse import quote
 
 import requests
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
@@ -39,6 +42,11 @@ from app.db import (
     STATUS_REVIEW_REQUIRED,
     STATUS_SKIPPED_DUPLICATE,
 )
+from app.deadline import DEADLINE_FIELD_NAME
+from app.deadline import DEADLINE_FIELD_TYPE
+from app.evidence import Result as EvidenceResult
+from app.evidence import content_terms
+from app.evidence import gather
 from app.paperless_client import PaperlessClient
 from app.reprocess import enqueue_paperless_document, retry_failed_document
 
@@ -110,6 +118,26 @@ ALL_STATUS_FILTERS = (
     STATUS_SKIPPED_DUPLICATE,
     *FAILED_STATUSES,
     STATUS_IGNORED,
+)
+
+# How many past questions the evidence page repeats at the top.
+SEARCH_HISTORY_ROWS = 8
+
+EVIDENCE_READONLY_NOTE = (
+    "PAPERLESS_TOKEN_READONLY ist nicht gesetzt, die Suche laeuft daher mit dem "
+    "Token des Workers. Sie bleibt hier trotzdem ein GET, aber die Beschraenkung "
+    "kommt aus dem Code und nicht aus dem Zugriff."
+)
+
+EVIDENCE_OFFLINE_NOTE = (
+    "Paperless antwortet nicht, die Frage bleibt ungeoeffnet. Ein Versuch wird "
+    "nicht in die Historie geschrieben."
+)
+
+EVIDENCE_CONFIRMED_NOTE = (
+    "Mindestens ein Kandidat hier traegt schon ein Urteil von dir. Die "
+    "Reihenfolge bleibt unveraendert: ein Urteil sagt, was du schon bestaetigt "
+    "hast, nicht was zuerst stehen soll."
 )
 
 
@@ -435,6 +463,29 @@ def save_document(
         )
         message = f"Saved via Review UI and applied to Paperless: {payload}"
 
+        # The deadline is not part of the form: it is either recognised or it is
+        # not, and the value written here is the one the pipeline stored. It has
+        # to travel with the approval, because with CONFIDENCE_THRESHOLD above
+        # what the rules proposer can reach no document is auto-approved and this
+        # is the only path that ever writes metadata to Paperless.
+        due_date = (item.get("due_date") or "").strip()
+        if due_date:
+            try:
+                outcome = client.set_custom_field(
+                    document_id=int(item["paperless_id"]),
+                    name=DEADLINE_FIELD_NAME,
+                    data_type=DEADLINE_FIELD_TYPE,
+                    value=due_date,
+                )
+            except requests.RequestException as exc:
+                message += f" | Frist {due_date} nicht geschrieben: {exc}"
+            else:
+                message += (
+                    f" | Frist {due_date} gesetzt"
+                    if outcome["written"]
+                    else f" | Frist {due_date} war schon gesetzt"
+                )
+
     action = (
         "corrected_auto_approved"
         if item.get("status") == STATUS_AUTO_APPROVED
@@ -686,6 +737,154 @@ def learning(request: Request):
             "patterns": db.correction_patterns(),
         },
     )
+
+
+def archive_words(db: Database) -> set[str]:
+    """Every word the archive's own titles and OCR excerpts carry.
+
+    Measured 2026-11-04 over 99 documents: 6014 such words decide whether a cut
+    of a compound is worth an API call - "vorauszahlungen" hands "vorauszahlung"
+    to the search and finds the assessment notice, while a cut the corpus does
+    not know ("beitra") returns nothing at all. Without this vocabulary the
+    question layer would guess its cuts and spend its budget on probes that
+    cannot hit.
+    """
+
+    words: set[str] = set()
+    for row in db.list_documents(limit=2000):
+        for text in (row.get("title"), row.get("original_title"), row.get("ocr_excerpt")):
+            words.update(content_terms(text or ""))
+    return words
+
+
+def evidence_history(db: Database) -> list[dict[str, Any]]:
+    """The questions asked before, each with how often it was already answered to.
+
+    A question the reader only ruled down shows as nothing answered, because
+    that is what a row of "nicht-relevant" means.
+    """
+
+    history = db.recent_searches(limit=SEARCH_HISTORY_ROWS)
+    counts = db.confirming_verdict_counts(
+        [str(entry["question_key"]) for entry in history]
+    )
+    for entry in history:
+        entry["verdict_count"] = counts.get(str(entry["question_key"]), 0)
+    return history
+
+
+@app.get("/evidence")
+def evidence_page(request: Request, q: str | None = None):
+    """The question layer as a page: which documents a question reaches and
+    which lines inside them carry a number.
+
+    Every Paperless call below is a GET on the read-only credential. The
+    question itself is remembered in this database, because answering one costs
+    a budget of search calls and a question asked twice should be recognisable.
+    """
+
+    db = get_db()
+    client = PaperlessClient()
+    question = (q or "").strip()
+
+    context: dict[str, Any] = {
+        "request": request,
+        "question": question,
+        "result": None,
+        "error": None,
+        "readonly": client.uses_readonly_token,
+        "readonly_note": EVIDENCE_READONLY_NOTE,
+        "paperless_url": settings.paperless_public_url.rstrip("/"),
+        "question_key": "",
+        "verdicts": {"documents": {}, "answers": {}},
+        "confirmed_note": EVIDENCE_CONFIRMED_NOTE,
+        "history": evidence_history(db),
+    }
+
+    if not question:
+        return templates.TemplateResponse("evidence.html", context)
+
+    try:
+        result = gather(
+            question,
+            search=lambda variant, *, sender_id, after, before: client.search_documents(
+                variant,
+                correspondent_id=sender_id,
+                created_gte=after,
+                created_lte=before,
+            ),
+            fetch_document=client.read_document,
+            correspondents=[
+                (int(item["id"]), str(item.get("name") or ""))
+                for item in client.list_correspondents()
+            ],
+            known_words=archive_words(db),
+            total_documents=client.count_documents(),
+        )
+    except (requests.RequestException, ValueError):
+        context["error"] = EVIDENCE_OFFLINE_NOTE
+        return templates.TemplateResponse("evidence.html", context)
+
+    key = result.question_key
+    db.record_search(
+        question,
+        [variant for variants in result.question.variants for variant in variants],
+        sum(attempt.hits for attempt in result.attempts),
+        len(result.candidates),
+        key,
+    )
+
+    rows = db.verdicts_for_key(key)
+    context["result"] = result
+    context["question_key"] = key
+    context["verdicts"] = {
+        "documents": {int(row["paperless_id"]): row for row in rows if not row["line_number"]},
+        "answers": {
+            f"{row['paperless_id']}|{row['line_number']}|{row['amount_value']}": row
+            for row in rows
+            if row["line_number"]
+        },
+    }
+    context["history"] = evidence_history(db)
+    return templates.TemplateResponse("evidence.html", context)
+
+
+@app.post("/evidence/verdict")
+def evidence_verdict(
+    q: str = Form(...),
+    question_key: str = Form(...),
+    paperless_id: int = Form(...),
+    verdict: str = Form(...),
+    line_number: int = Form(0),
+    amount_value: str = Form(""),
+    amount_role: str | None = Form(None),
+    amount_modifier: str | None = Form(None),
+):
+    """What the reader says about one answer, stored in this database alone.
+
+    No PaperlessClient is built here, and that is the whole guarantee the
+    evidence page can make after this: clicking an answer writes a row in
+    SQLite, while reading the archive stays the GET's job.
+    """
+
+    db = get_db()
+    try:
+        db.record_verdict(
+            question_key,
+            paperless_id,
+            verdict,
+            line_number,
+            amount_value,
+            amount_role,
+            amount_modifier,
+        )
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Urteil oder Frage-Schluessel ist nicht gueltig",
+        )
+
+    return RedirectResponse(f"/evidence?q={quote(q)}", status_code=303)
 
 
 @app.get("/health")

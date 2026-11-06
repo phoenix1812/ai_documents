@@ -22,6 +22,10 @@ from app.db import STATUS_FAILED_LLM
 from app.db import STATUS_FAILED_OCR
 from app.db import STATUS_NEEDS_REVIEW
 from app.db import STATUS_SKIPPED_DUPLICATE
+from app.deadline import DEADLINE_FIELD_NAME
+from app.deadline import DEADLINE_FIELD_TYPE
+from app.deadline import Deadline
+from app.deadline import extract_deadline
 from app.hash_store import ocr_sha256
 from app.hash_store import sha256
 from app.models import ClassificationResult
@@ -225,6 +229,7 @@ class DocumentClassifier:
         paperless_url: str | None,
         subject: str | None = None,
         document_date: str | None = None,
+        due_date: str | None = None,
     ) -> str:
         """Store review state in SQLite only.
 
@@ -239,6 +244,7 @@ class DocumentClassifier:
             document_type=document_type,
             subject=subject,
             document_date=document_date,
+            due_date=due_date,
             tags=tags,
             confidence=confidence,
             reason=reason,
@@ -326,6 +332,33 @@ class DocumentClassifier:
             return f"marking failed: {exc}"
 
         return "marked in Paperless" + ("" if marking["tag_added"] else " (tag already set)")
+
+    def _apply_deadline(self, document_id: int, deadline: Deadline | None) -> str:
+        """Write the recognised deadline to Paperless as a custom field.
+
+        Called after the classification itself is applied, so a failure here must
+        not turn an approved document into a failure: title, correspondent, type
+        and tags are already in Paperless at that point and re-running the whole
+        document would write them a second time for one missing field.
+        """
+        if deadline is None:
+            return ""
+
+        try:
+            outcome = self.paperless.set_custom_field(
+                document_id=document_id,
+                name=DEADLINE_FIELD_NAME,
+                data_type=DEADLINE_FIELD_TYPE,
+                value=deadline.date,
+            )
+        except (requests.RequestException, ValueError) as exc:
+            logger.warning("Could not write the deadline for %s: %s", document_id, exc)
+            return f"Frist {deadline.date} nicht geschrieben: {exc}"
+
+        if not outcome["written"]:
+            return f"Frist {deadline.date} war schon gesetzt"
+
+        return f"Frist {deadline.date} gesetzt"
 
     def process_document(self, document_id: int) -> str:
         file_hash = ""
@@ -461,6 +494,13 @@ class DocumentClassifier:
             result.correspondent = to_display_case(result.correspondent)
             applied_rule = apply_tax_authority_type_rule(result)
 
+            # Read from the full text, not from the excerpt: of the 14 deadline
+            # wordings measured on his archive, 2 sit behind character 3000
+            # (paperless 32 at 3248 and 49 at 3541).
+            deadline = extract_deadline(content)
+            if deadline is not None:
+                result.due_date = deadline.date
+
             # Tags come from his own approved set whenever that key is decided;
             # an undecided key must not invent tag names in Paperless.
             proposed_tags = sorted(
@@ -498,6 +538,11 @@ class DocumentClassifier:
             if name_rule:
                 reason = f"{reason} | Regel: Schreibweise aus deinem Bestand".strip(" |")
 
+            if deadline is not None:
+                reason = (
+                    f'{reason} | Regel: Frist {deadline.date} aus "{deadline.evidence}"'
+                ).strip(" |")
+
             if not validation.valid:
                 return self._store_review(
                     document_id=document_id,
@@ -515,6 +560,7 @@ class DocumentClassifier:
                     paperless_url=paperless_url,
                     subject=result.subject,
                     document_date=result.document_date,
+                    due_date=result.due_date,
                 )
 
             tag_reasons: list[str] = []
@@ -562,6 +608,7 @@ class DocumentClassifier:
                     paperless_url=paperless_url,
                     subject=result.subject,
                     document_date=result.document_date,
+                    due_date=result.due_date,
                 )
 
             if settings.dry_run:
@@ -574,6 +621,7 @@ class DocumentClassifier:
                     document_type=result.document_type,
                     subject=result.subject,
                     document_date=result.document_date,
+                    due_date=result.due_date,
                     tags=result.tags,
                     confidence=confidence,
                     reason=reason,
@@ -594,6 +642,8 @@ class DocumentClassifier:
                 tags=result.tags,
             )
 
+            deadline_note = self._apply_deadline(document_id, deadline)
+
             self.db.insert_document(
                 paperless_id=document_id,
                 file_hash=file_hash,
@@ -603,6 +653,7 @@ class DocumentClassifier:
                 document_type=result.document_type,
                 subject=result.subject,
                 document_date=result.document_date,
+                due_date=result.due_date,
                 tags=result.tags,
                 confidence=confidence,
                 reason=reason,
@@ -611,7 +662,14 @@ class DocumentClassifier:
                 paperless_url=paperless_url,
                 export_path="",
                 status=STATUS_AUTO_APPROVED,
-                error_message=f"Auto-approved and applied to Paperless: {applied_payload}",
+                error_message=" | ".join(
+                    part
+                    for part in (
+                        f"Auto-approved and applied to Paperless: {applied_payload}",
+                        deadline_note,
+                    )
+                    if part
+                ),
             )
             return STATUS_AUTO_APPROVED
 

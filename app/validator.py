@@ -13,6 +13,7 @@ from datetime import UTC
 from datetime import datetime
 
 from app.config import settings
+from app.deadline import DEADLINE_MAX_YEARS_AHEAD
 from app.models import ClassificationResult
 from app.prompts import DOCUMENT_TYPES
 
@@ -104,7 +105,7 @@ def _is_generic_title(value: str | None) -> bool:
     return normalized in GENERIC_TITLES
 
 
-def _valid_iso_date(value: str | None) -> bool:
+def _valid_iso_date(value: str | None, *, max_years_ahead: int = 1) -> bool:
     if value is None:
         return True
 
@@ -116,7 +117,7 @@ def _valid_iso_date(value: str | None) -> bool:
     # document). A date outside this range is a hallucination, not metadata.
     year = int(match.group("year"))
     current_year = datetime.now(UTC).year
-    return MIN_PLAUSIBLE_YEAR <= year <= current_year + 1
+    return MIN_PLAUSIBLE_YEAR <= year <= current_year + max_years_ahead
 
 
 def _valid_amount(value: str | None) -> bool:
@@ -234,7 +235,10 @@ def validate_classification(
     if result.document_date and not _valid_iso_date(result.document_date):
         reasons.append("invalid_document_date")
 
-    if result.due_date and not _valid_iso_date(result.due_date):
+    if result.due_date and not _valid_iso_date(
+        result.due_date,
+        max_years_ahead=DEADLINE_MAX_YEARS_AHEAD,
+    ):
         reasons.append("invalid_due_date")
 
     if result.amount and not _valid_amount(result.amount):

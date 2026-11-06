@@ -19,6 +19,9 @@ class Settings:
             "PAPERLESS_PUBLIC_URL", self.paperless_url
         ).rstrip("/")
         self.paperless_token = os.getenv("PAPERLESS_TOKEN", "")
+        # Optional: a token whose user may read but not write. The question layer
+        # uses it so that answering cannot change the archive.
+        self.paperless_token_readonly = os.getenv("PAPERLESS_TOKEN_READONLY", "")
         self.ai_worker_trigger_url = os.getenv(
             "AI_WORKER_TRIGGER_URL", "http://ai-worker:8080/process"
         )

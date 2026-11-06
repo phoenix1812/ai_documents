@@ -84,6 +84,7 @@
               <th>Typ</th>
               <th>Korrespondent</th>
               <th>Tags</th>
+              <th>Frist</th>
               <th>Confidence</th>
               <th>Aktion</th>
             </tr>
@@ -121,6 +122,7 @@
                     {% endif %}
                   </div>
                 </td>
+                <td>{{ item.due_date or "—" }}</td>
                 <td><span class="confidence {{ item.confidence_class or '' }}">{{ item.confidence_display }}</span></td>
                 <td>
                     <a class="button small secondary" href="/items/{{ item.id }}">

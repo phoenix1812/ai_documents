@@ -159,11 +159,26 @@ class PaperlessClient:
             "Authorization": f"Token {settings.paperless_token}",
             "Content-Type": "application/json",
         }
+        # The question layer only reads, so it runs on a token that cannot write.
+        # Without one it falls back to the worker token and the page says so: a
+        # surface that silently used the write credential would be the one thing
+        # D3 was meant to rule out.
+        self.readonly_token = settings.paperless_token_readonly or settings.paperless_token
+        self.readonly_headers = {
+            "Authorization": f"Token {self.readonly_token}",
+            "Content-Type": "application/json",
+        }
+        self.uses_readonly_token = bool(settings.paperless_token_readonly)
 
     def _url(self, path: str) -> str:
         return f"{self.base_url}{path}"
 
-    def _get_paginated(self, path: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    def _get_paginated(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> list[dict[str, Any]]:
         """Load all results from a paginated Paperless endpoint."""
         url = self._url(path)
         results: list[dict[str, Any]] = []
@@ -171,7 +186,7 @@ class PaperlessClient:
         while url:
             response = requests.get(
                 url,
-                headers=self.headers,
+                headers=headers or self.headers,
                 params=params,
                 timeout=30,
             )
@@ -326,6 +341,127 @@ class PaperlessClient:
     def get_documents(self) -> list[dict[str, Any]]:
         """Load all available documents."""
         return self._get_paginated("/api/documents/")
+
+    def count_documents(self) -> int:
+        """How many documents the archive holds, on one read-only page of size 1.
+
+        The question layer weights a term by how rare it is, so it needs the
+        size of the whole archive rather than the size of one result page.
+        """
+        response = requests.get(
+            self._url("/api/documents/"),
+            headers=self.readonly_headers,
+            params={"page_size": 1},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return int(data.get("count") or 0) if isinstance(data, dict) else len(data)
+
+    def list_correspondents(self) -> list[dict[str, Any]]:
+        """Every sender name in the archive, with its id, on the read-only token."""
+        return self._get_paginated("/api/correspondents/", headers=self.readonly_headers)
+
+    def search_documents(
+        self,
+        term: str,
+        *,
+        correspondent_id: int | None = None,
+        created_gte: str | None = None,
+        created_lte: str | None = None,
+        page_size: int = 30,
+    ) -> list[dict[str, Any]]:
+        """One read-only search page, GET only.
+
+        Measured against the live API on 2026-11-04: `created__gte` and
+        `created__lte` do filter, but on the intake date, and `after`/`before` do
+        nothing at all in 3.3.1. A term is therefore searched as it is, without
+        this method inventing a period it cannot honour."""
+        params: dict[str, Any] = {"query": term, "page_size": page_size}
+        if correspondent_id is not None:
+            params["correspondent__id"] = correspondent_id
+        if created_gte:
+            params["created__gte"] = created_gte
+        if created_lte:
+            params["created__lte"] = created_lte
+
+        response = requests.get(
+            self._url("/api/documents/"),
+            headers=self.readonly_headers,
+            params=params,
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, dict):
+            return data.get("results") or []
+        return data
+
+    def read_document(self, document_id: int) -> dict[str, Any]:
+        """One document with its fulltext, on the read-only credential."""
+        response = requests.get(
+            self._url(f"/api/documents/{document_id}/"),
+            headers=self.readonly_headers,
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def ensure_custom_field(self, name: str, data_type: str) -> int:
+        """Return the ID of a custom field, creating it on first use.
+
+        The field belongs to the archive, not to one document, so it is looked up
+        by exact name before anything is created.
+        """
+        existing = self._find_by_name("/api/custom_fields/", name)
+        if existing:
+            return int(existing["id"])
+
+        response = requests.post(
+            self._url("/api/custom_fields/"),
+            headers=self.headers,
+            json={"name": name.strip(), "data_type": data_type},
+            timeout=30,
+        )
+        response.raise_for_status()
+        return int(response.json()["id"])
+
+    def set_custom_field(
+        self,
+        document_id: int,
+        name: str,
+        data_type: str,
+        value: str,
+    ) -> dict[str, Any]:
+        """Write one custom field value, keeping every other field on the document.
+
+        The PATCH sends the merged list because Paperless treats it as the whole
+        truth: drf_writable_nested deletes every instance that is missing from it
+        (``delete_reverse_relations_if_need``), so sending only the new value
+        would silently drop the rest.
+
+        A document that already carries this exact value is left untouched, which
+        keeps a reprocess from writing to Paperless for nothing.
+        """
+        field_id = self.ensure_custom_field(name, data_type)
+
+        current = [
+            dict(entry) for entry in (self.get_document(document_id).get("custom_fields") or [])
+        ]
+        for entry in current:
+            if int(entry.get("field") or 0) == field_id:
+                if str(entry.get("value") or "") == value:
+                    return {"field": name, "value": value, "written": False}
+                entry["value"] = value
+                break
+        else:
+            current.append({"field": field_id, "value": value})
+
+        self.update_document(
+            document_id=document_id,
+            payload={"custom_fields": current},
+        )
+        return {"field": name, "value": value, "written": True}
 
     def get_document(self, document_id: int) -> dict[str, Any]:
         """Load a single document."""

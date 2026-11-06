@@ -28,11 +28,22 @@ Paperless bleibt die Single Source of Truth. PDFs werden nicht separat exportier
 - Serverseitige, stabile Titelgenerierung
 - Validierung vor automatischem Schreiben nach Paperless
 - Review-UI fuer unsichere, fehlgeschlagene und manuell zu pruefende Dokumente
+- Fristen aus dem Volltext lesen und als Paperless-CustomField `Frist` schreiben,
+  mit Gates gegen veraltete und unplausibel weit entfernte Daten
 - Retry und Reprocess ueber denselben Queue-Trigger wie Paperless
 - Duplikaterkennung per PDF-SHA256
 - Duplikate aus der Review-UI loeschen: Zwei-Stufen-Bestaetigung, erst Paperless,
   dann die SQLite-Zeile
 - Wahrscheinliche Duplikaterkennung per normalisiertem OCR-SHA256
+- Beleg-Seite `GET /evidence`: zerlegt eine Frage in Suchvarianten, zeigt die
+  getroffenen Dokumente mit ihren Zeilen, Rollen, Modifikatoren und Summen -
+  alles per GET, Antwort wird keine erfunden
+- Gefragte Art: nennt die Frage ein Antwortwort (`Identifikationsnummer`, `IBAN`,
+  `Telefon`), zeigt die Seite auch Zeilen ohne Geldbetrag und die Werte, die das
+  Dokument neben seinem eigenen Label druckt (`app/values.py`, 14 Arten)
+- Suchhistorie der Beleg-Seite in SQLite (`search_history`), letzte 200 Fragen
+- Urteile auf der Beleg-Seite: ein Klick sagt, ob Dokument oder Zahl die Antwort
+  war; gespeichert in SQLite (`evidence_verdicts`), gezeigt bei derselben Frage
 - SQLite-Audit fuer Status, Fehler, Review-Entscheidungen und Korrekturen
 - Docker-Compose-Setup mit Paperless, PostgreSQL, Redis, Ollama, AI-Worker und Review-UI
 
@@ -63,9 +74,11 @@ app/classifier.py
   +--> Paperless API: Dokument, OCR und PDF-Bytes laden
   +--> PDF-Hash und OCR-Hash pruefen
   +--> app/proposal_source.py: Vorschlag (ollama oder rules)
+  +--> app/deadline.py: Frist aus dem Volltext, mit zwei Gates
   +--> classifier.py: finalen Titel bauen
   +--> validator.py: Ergebnis pruefen
   +--> Paperless API: Metadaten aktualisieren
+  +--> Paperless API: Frist als CustomField schreiben
   +--> SQLite: Status und Review-Daten speichern
 
 
@@ -74,6 +87,16 @@ app/reconciler.py (Background-Thread, alle RECONCILIATION_INTERVAL_SECONDS)
   | vergleicht Paperless-Bestand mit der AI-Datenbank
   v
 app/document_queue.py
+
+app/review_ui.py: GET /evidence (liest nur) + POST /evidence/verdict (urteilt nur in SQLite)
+  |
+  | Frage in Woerter zerlegen, Varianten suchen, Belegzeilen lesen
+  v
+app/evidence.py  <->  app/roles.py (Rolle und Modifikator pro Zahl)
+                 <->  app/values.py (Art und Wert aus dem Label des Dokuments)
+  |
+  +--> Paperless API: GET-Suche und Dokument-GET mit PAPERLESS_TOKEN_READONLY
+  +--> SQLite: search_history (Frage, Varianten, Treffer, Kandidaten)
 ```
 
 Die Review-UI laeuft als eigener Prozess. Reprocess und Retry klassifizieren
@@ -430,10 +453,253 @@ wird ohne Klick auf diese Schaltflaeche nie veroendert. Zeilen, die vor diesen
 beiden Spalten angelegt wurden, haben kein Thema und kein Datum gespeichert;
 ihr neu gebauter Titel enthaelt deshalb nur Dokumenttyp und Korrespondent.
 
+## Fristen
+
+`app/deadline.py` liest aus dem Volltext des Dokuments ein Datum, das eine Frist
+ist, und schreibt es in das Paperless-CustomField `Frist` (Datentyp `date`). Der
+Feldwert steht zusaetzlich in der Spalte `due_date` der SQLite-Tabelle und wird in
+der Review-UI angezeigt - in der Dokumentliste und im Detail.
+
+Gelesen wird der Volltext aus Paperless, nicht der auf 3000 Zeichen gekuerzte
+OCR-Auszug: von den 14 Frist-Formulierungen im Bestand am 03.11.2026 stehen zwei
+hinter dieser Grenze (Paperless 32 bei Zeichen 3248 und 49 bei 3541).
+
+Erkannt werden nur Formulierungen, die ein Faelligkeitsdatum nennen, in zwei
+Stufen:
+
+| Stufe | Formulierungen |
+| --- | --- |
+| Zahlungsfrist | `zahlbar bis`, `fällig am/zum/bis`, `Zahlungsziel`, `Zahlung bis`, `Widerspruchs-/Einspruchs-/Rechtsmittel-/Kündigungsfrist` |
+| Vertragsdatum | `Vertragsablauf`, `Vertrag endet am`, `läuft aus am`, `gültig bis`, `Änderungsbeginn` |
+
+Eine Zahlungsfrist gewinnt gegen ein Vertragsdatum im selben Dokument. Datumsangaben
+ohne eine dieser Formulierungen werden nicht gelesen: eine Kundennummer, ein
+Betrag oder eine Lieferzeit („Lieferzeit bis zu 3 Wochen") ist keine Frist.
+
+Drei Regeln verhindern, dass ein Feld gefuellt wird, das er nicht brauchen kann:
+
+- **nicht in der Vergangenheit** - eine abgelaufene Frist ist keine Aufgabe
+- **nicht weiter als `DEADLINE_MAX_YEARS_AHEAD` Jahre voraus** (2 Jahre) - der
+  Validator zieht dieselbe Grenze fuer `due_date`; das Dokumentdatum behaelt
+  seine engere Grenze von einem Jahr
+- **keine Auswahl bei Mehrdeutigkeit** - nennt das Dokument zwei verschiedene
+  Daten derselben Stufe, wird nichts geschrieben, statt eines zu raten. Dasselbe
+  gilt fuer ein ungueltiges Kalenderdatum wie den 31.02.
+
+Gemessen am Bestand am 03.11.2026 (96 Dokumente) ergibt das: 14 Treffer, 11
+veraltet, 1 zu weit voraus (eine Lebensversicherung mit dem Jahr 2055), 2 im
+selben Dokument mehrdeutig - also 0 geschriebene Fristen. Das Feld fuellt sich
+erst mit Dokumenten, die eine offene Zahlungsfrist tragen.
+
+Der Schreibweg mischt die Frist in die vorhandene `custom_fields`-Liste ein und
+PATCHt die vollstaendige Liste. Paperless behandelt diese Liste als ganze
+Wahrheit und loescht jede Instanz, die nicht darin vorkommt
+(`drf_writable_nested.delete_reverse_relations_if_need`) - ein PATCH nur mit der
+Frist wuerde alle anderen Felder des Dokuments entfernen. Ist der Wert bereits
+gesetzt, unterbleibt der Schreibzugriff ganz.
+
+Das Feld ist in der Review-UI nicht editierbar. Eine Korrektur erfolgt in
+Paperless selbst; ein erneuter Lauf mit `force` schreibt denselben erkannten
+Wert noch einmal.
+
+## Beleg-Oberflaeche (/evidence)
+
+Die Seite beantwortet keine Fragen, sie zeigt Belege: welche Dokumente eine Frage
+erreichen, welche Zeilen darin eine Zahl tragen, und welche Rolle und welchen
+Modifikator das Dokument selbst fuer diese Zahl schreibt. Eine Zahl ohne
+Rollenwort bleibt ungerollt; erfunden wird nichts.
+
+`app/evidence.py:555` (`gather`) zerlegt die Frage in Inhaltswörter und sucht
+jedes Wort in mehreren Varianten. Sechs Messungen gegen die laufende API
+(04.11.2026, 99 Dokumente) bestimmen, wie:
+
+* die ganze Frage als ein `query` liefert 0 Treffer, ein einzelnes Inhaltswort
+  trifft seine Dokumente - der Index ist kein Frage-Antworter;
+* `Einspeiseverguetung` liefert 0, der Stamm `Einspeis` 3: zusammengesetzte
+  Woerter sind blind, also wird geschnitten;
+* der Index stammernt, aber haelt nur, was er kennt - `vorauszahlung` =
+  `vorauszahlungen` = `vorauszahl` = 5 Dokumente, waehrend `beitra` und
+  `haftpflich` 0 liefern. Schnitte kommen deshalb aus dem Wortinventar des
+  Bestands (`app/review_ui.py:742` `archive_words`), nicht aus geratenen
+  Kuerzungen;
+* der Index faltet keine Umlaute: von 30 getesteten Woertern mit Umlaut
+  verloren 29 jeden Treffer in der zweibuchstabigen Schreibweise
+  (`abfallgebuehren` 0 gegen `abfallgebühren` 10), der Bestand selbst ist
+  503 zu 227 gespalten - gesucht wird deshalb beide Schreibweisen
+  (`app/evidence.py:252` `fold`);
+* `OR` liefert 0, die Vereinigung der Varianten passiert hier;
+* `created__gte`/`created__lte` filtern das Aufnahmedatum, `after`/`before` tun
+  in 3.3.1 nichts - ein gelesener Zeitraum steht auf der Seite als das, was er
+  ist: eine Naeherung.
+
+Dazu kommt seit dem 06.11.2026 die Schwelle fuer das, was ueberhaupt gesucht
+wird: `_LETTERS` (`app/evidence.py:121`) hielt Woerter unter vier Buchstaben
+fur unbrauchbar und fiel damit jeden Vornamen durch - die Frage „Identifikations-
+nummer Max" suchte nur das eine Wort. Gemessen ueber die 19 Fragen in der
+gespeicherten Historie bringt die Schwelle bei drei Buchstaben genau zwei Woerter
+zurueck: einen Vornamen und die Kurzform eines Pruefvereins, beides
+Sachwoerter. Fuellig keins der drei-Buchstaben-Fuellwoerter kam in diesen Fragen
+vor; die, die die Sprache in einer Frage sonst hat („und", „auf", „nur", „wem"),
+stehen jetzt in `STOPWORDS` (`app/evidence.py:78`), weil sie sonst seit der
+Schwelle einen Suchaufruf kosten wuerden.
+
+Budgets (`app/evidence.py:64-68`): 4 Varianten pro Wort, 14 Suchaufrufe, 12
+geoeffnete Kandidaten, 6 Summanden pro Summe. Jeder einzelne Aufruf steht als
+Zeile unter "Versuche", samt der Trefferzahl, die er zurückgab - woran man
+sieht, welche Variante blind war.
+
+Die Reihenfolge der Kandidaten gewichtet Selteneheit: `zahle` steht in 30 von 99
+Dokumenten, `einspeis` in 3. Ohne Gewichtung entschiede das 30-Dokument-Wort.
+
+Summen werden nur aus Beträgen gebildet, die bereits dieselbe Rolle und
+denselben Modifikator tragen, und die Seite zeigt die Summanden dazu; ohne
+Rollenwort im Dokument entsteht keine Summe.
+
+Jede Frage bleibt in der SQLite-Tabelle `search_history`
+(`app/db.py:755` `record_search`) mit ihren Varianten, der Trefferzahl und der
+Zahl der Kandidaten; die letzten acht Fragen stehen oben auf der Seite als
+Link, und die Kappe von 200 Zeilen (`app/db.py:73`) haelt die Tabelle klein, ohne
+dass ein Raum eine Loescharbeit braucht.
+
+Alles, was diese Seite an Paperless fragt, ist ein GET:
+`search_documents` (`app/paperless_client.py:365`), `read_document`
+(`app/paperless_client.py:400`), `list_correspondents`
+(`app/paperless_client.py:361`) und `count_documents`
+(`app/paperless_client.py:345`) laufen alle auf
+`PAPERLESS_TOKEN_READONLY` (`app/paperless_client.py:171`). Ist die Variable
+leer, faellt die Suche auf den Worker-Token zurück und die Seite weist sich
+selbst darauf hin (`app/review_ui.py:126`); sie bleibt trotzdem beim Lesen, und
+`scripts/check-env.sh` verlangt die Variable nicht.
+
+### Gefragte Art: Antworten, die kein Geld sind
+
+Geld ist die haeufigste Antwort, nicht die einzige. Gemessen ueber den Bestand
+(04.11.2026, 99 Dokumente, 5235 Zeilen mit einer Ziffer): 1105 dieser Zeilen
+tragen einen Geldbetrag – 21 %. In den anderen stehen die Antworten, die andere
+Fragen suchen: eine Identifikationsnummer, ein Aktenzeichen, eine Telefonnummer,
+ein Gueltigkeitsdatum.
+
+`app/values.py` liest deshalb nie eine Form, sondern das Wort, das das Dokument
+selbst ueber den Wert gesetzt hat: Label und Wert in derselben Zeile, oder Label
+am Zeilenende und Wert in der naechsten – seit dem 06.11.2026 auch ueber
+hoechstens zwei Leerzeilen hinweg. Warum nicht die Form, steht im Bestand:
+als Form gelesen traf „Kennzeichen" 1460 Zeilen in 94 Dokumenten, ueber sein
+eigenes Label gelesen 4 Zeilen. Der Katalog ist geschlossen (14 Arten,
+`app/values.py:194` `KINDS`), und welche Art davon gefragt ist, kommt aus der
+Frage selbst (`app/values.py:382` `kinds_from_question`): ganze, gefaltete
+Woerter, nicht ihre Teile – „nr" in „Nummer" ist kein eigenes Frage-Wort.
+„Welche Nummer" ohne Zusatz oeffnet die sieben Zahlenarten, „Telefonnummer" nur
+eine, und eine Frage ohne Art-Wort (`Einspeisevergütung monatlich`) bleibt genau
+was sie war: Betraege, Rollen, Summen.
+
+Gelesen wird nur, was die eigene Regel der Art erfuellt:
+
+| Art | Werte | Doku. | Regel |
+|---|---|---|---|
+| BIC | 155 | 53 | 8 oder 11 Zeichen, die Kette muss dort enden, und jeder Buchstabe gross |
+| IBAN | 170 | 55 | 22 Zeichen, mit „DE" |
+| Telefonnummer | 138 | 75 | 7 bis 14 Ziffern |
+| E-Mail-Adresse | 115 | 61 | Form – der einzige Formfall |
+| Identifikationsnummer | 66 | 20 | genau 11 Ziffern |
+| Steuernummer | 53 | 19 | 9 bis 13 Ziffern, Schichten durch „/" |
+| Aktenzeichen | 27 | 10 | 5 bis 25 Zeichen aus Ziffern, Buchstaben, „/", „-" |
+| Kontonummer | 25 | 6 | 8 bis 14 Ziffern |
+| Versicherungsnummer | 22 | 10 | 6 bis 13 Ziffern |
+| Gueltigkeit | 15 | 15 | echtes Datum, 1990 bis 2100 |
+| Mitgliedsnummer | 12 | 10 | wie Aktenzeichen |
+| Geburtsdatum | 10 | 7 | echtes Datum, 1900 bis 2020 |
+| Vertragsnummer | 6 | 5 | wie Aktenzeichen |
+| Beitragssatz | 1 | 1 | Zahl mit „%" oder „Prozent", hoechstens 100 |
+
+Die Spalten sind ein Lauf vom 06.11.2026 durch alle 99 Dokumente. Der zweite,
+unabhaengig geschriebene Prueflauf vom 04.11. hielt damals alle vierzehn Arten
+gegen eine eigene Pruefung: jeder ausgegebene Wert blieb auch nach ihr gueltig,
+keiner wurde nachtraeglich verworfen. Fuer die beiden Aenderungen vom 06.11. ist
+dieselbe Pruefung erneut gefuehrt – der BIC gegen ISO 9366, die zwolf neuen
+Wertezeilen gegen ihren Ziffernanteil. Zwei Messungen stecken in den Regeln – 12
+der 106 telefon-nahen Zahlenreihen trugen 15 bis 21 Ziffern (zwei Nummern
+nebeneinander, nicht eine), und 46 der Werte, die die nackte IBAN-Form
+erreichte, waren 17 bis 35 Zeichen lang, darunter eine IBAN, die den BIC hinter
+sich auffraß. Beim BIC verlangen daher beide Enden eine Grenze: ohne die linke
+saust der Treffer ein Zeichen in eine beschadigte Kette hinein und kommt als
+gueltig aussehender Code wieder heraus.
+
+Die BIC-Zeile der Tabelle ist gegen den Lauf vom 04.11. (169 Werte) um 14
+gesunken, und das ist die dritte Messung an derselben Art: weil die
+Formregeln der Datei case-insensitive kompiliert werden – ein Labelwort steht in
+jeder Schreibweise –, traf die Grossbuchstabenkette auch gewoehnliche Woerter.
+Die 14 Lesungen, die jetzt weg sind, standen in vier verschiedenen Schreibungen,
+und keine ist ein Code: ein Personenname, ein Firmenname, ein Alltagswort, und
+eine Kette, die OCR in Gross- und Kleinbuchstaben zerlegt hat.
+Ein Code wird nie klein gedruckt, also prueft `_bic_ok` (`app/values.py:118`)
+die Grossbuchstaben jetzt selbst, im check statt im Muster - das Muster muss
+case-insensitive bleiben, sonst findet es sein Label nicht mehr.
+
+Ein Wert gegen die Regel wird nicht gezeigt, auch nicht der naechstbeste. Auf 22
+der 118 Zeilen, die ein IdNr-Label drucken, stand am 04.11. statt der Nummer
+eine kurze Ziffernfolge zwischen 5 und 9, auf 8 gar nichts – die Regel erreicht
+beide nicht. Was die Leerzeilen-Aenderung von oben wirklich oeffnet, hat der
+Lauf vom 06.11. nachgerechnet: im ganzen Bestand sind es 12 Wertezeilen in 10
+Dokumenten (1 Identifikationsnummer ueber eine Leerzeile, 6 IBAN, 5
+Telefonnummer), alle zwolf tragen Ziffern, und zwischen Label und Wert steht
+keins der Labelwoerter einer anderen Art. Die eine IdNr-Zeile ist genau der
+Fall, an dem die Frage „Identifikationsnummer Max" bisher endete: Ankuendigung,
+Leerzeile, Nummer.
+Mehrere Werte einer Art in einem Dokument werden nicht verglichen, sondern
+gezaehlt: die Seite zeigt beide samt Zeile und sagt, wie viele dieser Art im
+Dokument stehen – dieselbe Regel wie bei zwei Betraegen derselben Rolle. Neu ist
+seit dem Nachrechnen auch die Herkunftsangabe: „Label 2 Zeilen hoeher" sagt sie,
+wenn eine Leerzeile ueberbrueckt wurde, statt wie vorher immer „eine Zeile".
+
+Eine Zeile ohne Geld bleibt nicht draussen, wenn sie einen gefragten Wert nennt:
+`evidence_lines` (`app/evidence.py:418`) haelt sie mit dem Grund „gefragte Art",
+und die Seite zeigt dafuer die Spalte „Art-Werte"
+(`app/templates/evidence.html:179`). Das Urteil ueber einen Wert nutzt
+dieselbe Tabelle wie das ueber eine Zahl – der Art-Key steht in `amount_role`,
+es braucht keine neue Spalte und keinen neuen Endpunkt. Die Art kostet auch
+keinen einzigen Suchaufruf: die Werte kommen aus dem Volltext, den die Seite fuer
+den Kandidaten ohnehin gelesen hat.
+
+### Urteil: was davon richtig war
+
+Unter jedem Kandidaten stehen zwei Felder, und unter jeder Zahl eines:
+**richtiges Dokument**, **nicht relevant**, **das ist die Antwort**. Was du
+klickst, geht in die SQLite-Tabelle `evidence_verdicts`
+(`app/db.py:819` `record_verdict`) und kommt beim naechsten Mal derselben Frage
+als Badge zurueck; der Knopf verschwindet dann, die Frage ist beantwortet.
+
+Der Merksatz am Ende der Kandidatenliste ist der Schluessel
+(`app/evidence.py:215` `question_key`): die Inhaltswörter in gefalteter
+Schreibweise und sortiert, dazu die erkannte Absender-ID und der gelesene
+Zeitraum. Nicht der Fragetext – denselben Sachverhalt formuliert man anders, und
+die ganze Frage ist dem Index ohnehin 0 Treffer. Die Grenze steht sichtbar auf
+der Seite: **andere Wörter ergeben eine andere Frage** und damit ein anderes
+Urteil. Wer 2025 fragt und 2026 meint, bekommt einen anderen Schluessel, weil
+der Zeitraum dazugehoert.
+
+Ein zweiter Klick auf dieselbe Stelle ersetzt das alte Urteil (`UNIQUE` über
+Schluessel, Dokument, Zeile und Wert) statt es zu stapeln, und ein Urteil über
+ein spaeter geloeschtes Dokument ist unsichtbar und harmlos – ein Aufraeumjob
+ist dafür nicht nötig.
+
+Die Reihung der Kandidaten bleibt unangetastet. Ein Urteil aendert, was
+dabeisteht, nicht was zuerst kommt: nichts im Bestand sagt, wann ein Dokument
+von einem neueren geloest wurde (filterbar ist nur das Aufnahmedatum), und eine
+Reihenfolge nach alten Urteilen würde den aelteren Bescheid oben lassen. Wenn
+genug Markierungen gelaufen sind, waere der naechste Schritt eine Schwelle wie
+die zwei Belege beim gelernten Regelkern – nicht das erste Urteil.
+
+Geschrieben wird nur an einer Stelle: `POST /evidence/verdict`
+(`app/review_ui.py:853`) baut keinen `PaperlessClient` und hat keinen
+Schreibpfad nach Paperless; `GET /evidence` bleibt der einzige Weg zur API und
+bleibt beim Lesen. Die Historie zaehlt, was bestaetigt wurde
+(`app/db.py:873` `confirming_verdict_counts`) – „nicht relevant" zaehlt nicht
+als Antwort, weil das das Gegenteil waere.
+
 ## Aus Korrekturen gelernte Regeln
 
 Jede Freigabe, Korrektur und Ablehnung landet in der Tabelle `review_decisions`
-(`app/db.py:214`). Frueher war das ein reines Protokoll - der Klassifikator hat es
+(`app/db.py:237`). Frueher war das ein reines Protokoll - der Klassifikator hat es
 nie gelesen. Sechs Muster daraus sind jetzt als deterministische Regeln eingebaut,
 weil ein 4B-Modell sie auch nach dem Prompt-Fix nicht zuverlaessig selbst trifft:
 
@@ -565,7 +831,7 @@ ausschliesslich Bestandsdaten:
 
 - **Absender** aus `correspondent_from_text` im Briefkopf, Aufloesung auf den
   kanonischen Paperless-Namen und `to_display_case` - ohne Raten.
-- **Dokumenttyp** aus `type_kernel` (`app/db.py:776`): dem einigen Typen, den du
+- **Dokumenttyp** aus `type_kernel` (`app/db.py:1039`): dem einigen Typen, den du
   fuer diesen Absender freigegeben hast. Zwei verschiedene Typen ergeben keinen
   Vorschlag, keinen Tipp und keinen Platzhalter.
 - **Datum** aus dem Paperless-Feld `created` (`PROPOSAL_DATE_SOURCE`), weil ohne
@@ -621,6 +887,7 @@ Wichtige Variablen:
 | `PAPERLESS_URL` | Interne Paperless-URL fuer API-Aufrufe |
 | `PAPERLESS_PUBLIC_URL` | Oeffentliche URL fuer Paperless und Links aus der Review-UI |
 | `PAPERLESS_TOKEN` | Paperless API-Token |
+| `PAPERLESS_TOKEN_READONLY` | optional; Token eines Paperless-Benutzers ohne Schreibrecht, mit dem die Beleg-Seite sucht. Leer = Rueckfall auf `PAPERLESS_TOKEN` mit Hinweis auf der Seite |
 | `PAPERLESS_HEALTHCHECK_URL` | Abweichende URL fuer den Paperless-Healthcheck, Standard `PAPERLESS_URL` |
 | `OLLAMA_URL` | Interne Ollama-URL |
 | `OLLAMA_MODEL` | Modellname fuer Klassifikation und Readiness-Check |
@@ -763,15 +1030,19 @@ Dockerfile-Bild gesetzt.
 │   ├── prompts.py            # Ollama-Prompts
 │   ├── ollama_client.py      # Ollama-Aufrufe
 │   ├── proposal_source.py    # Vorschlagsquelle: Modell oder gelernte Regeln (PROPOSAL_SOURCE)
+│   ├── deadline.py           # Frist aus dem Volltext, zwei Gates, CustomField "Frist"
+│   ├── roles.py              # Rolle und Modifikator pro Zahl, aus dem Dokument selbst
+│   ├── evidence.py           # Frage zerlegen, Varianten suchen, Belegzeilen und Summen
+│   ├── values.py             # Gefragte Art: 14 Antworttypen, je aus dem Label des Dokuments
 │   ├── paperless_client.py   # Paperless-API-Client
 │   ├── validator.py          # Prueft Ergebnisse vor Auto-Apply
-│   ├── db.py                 # documents-, review_decisions- und app_meta-Tabelle
+│   ├── db.py                 # documents-, review_decisions-, search_history-, app_meta-Tabelle
 │   ├── hash_store.py         # PDF-/OCR-Hashbildung fuer die Duplikaterkennung
 │   ├── health.py             # Health- und Readiness-Checks
 │   ├── reconciler.py         # periodischer Paperless-Abgleich inkl. Bestandsschutz
 │   ├── reconcile_missing.py  # einmaliger, manueller Nachlauf (scripts/reconcile_missing.sh)
 │   ├── reprocess.py          # Reprocess/Retry ueber denselben Queue-Trigger
-│   ├── review_ui.py          # FastAPI-Review-UI mit Basic-Auth
+│   ├── review_ui.py          # FastAPI-Review-UI mit Basic-Auth, auch GET /evidence
 │   ├── logging_config.py     # Logging-Setup
 │   ├── static/
 │   └── templates/

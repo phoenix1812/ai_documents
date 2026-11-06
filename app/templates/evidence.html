@@ -1,0 +1,311 @@
+{% extends "base.html" %}
+{% block title %}Belege · AI Documents{% endblock %}
+
+{% block content %}
+<div class="page-shell wide">
+  <section class="page-heading">
+    <h1>Belege</h1>
+    <p>Eine Frage wird hier in Einzelwörter zerlegt, jedes Wort in seinen Schreibweisen
+      und in Schnitten gesucht, und für die getroffenen Dokumente stehen dann die Zeilen
+      da, die eine Zahl tragen – mit der Rolle und dem Modifikator, die das Dokument selbst
+      dafür schreibt. Die Seite beantwortet nichts: sie zeigt, wo etwas im Bestand steht.</p>
+    <p>Was davon richtig war, kannst du markieren. Die Markierung bleibt in dieser Datenbank
+      und erscheint wieder, wenn dieselbe Frage nochmal gestellt wird – auf die Reihenfolge
+      der Kandidaten hat sie keinen Einfluss.</p>
+  </section>
+
+  <section class="filter-card">
+    <form class="filter-grid" method="get" action="/evidence">
+      <label class="field field-search">
+        <span>Frage</span>
+        <div class="input-with-icon">
+          <input type="text" name="q" value="{{ question }}" placeholder="z. B. Einspeisevergütung 2025">
+          <span class="input-icon">⌕</span>
+        </div>
+      </label>
+      <button class="button filter-button" type="submit">Belege suchen</button>
+      <a class="button secondary reset-button" href="/evidence">↻ Zurücksetzen</a>
+    </form>
+  </section>
+
+  {% if not readonly %}
+    <div class="notice">{{ readonly_note }}</div>
+  {% endif %}
+
+  {% if error %}
+    <div class="notice error-notice">{{ error }}</div>
+  {% endif %}
+
+  <section class="panel">
+    <h2>Suchhistorie</h2>
+    {% if not history %}
+      <p>Noch keine Frage gestellt.</p>
+    {% else %}
+      <table>
+        <thead>
+          <tr>
+            <th>Frage</th>
+            <th>Zeitpunkt</th>
+            <th>Index-Treffer</th>
+            <th>Kandidaten</th>
+            <th>Bestätigt</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for entry in history %}
+            <tr>
+              <td>
+                <a href="/evidence?q={{ entry.query | urlencode }}">{{ entry.query }}</a>
+                <div class="row-subtext">{{ entry.variants | join(", ") }}</div>
+              </td>
+              <td>{{ entry.created_at }}</td>
+              <td>{{ entry.hits }}</td>
+              <td>{{ entry.candidates }}</td>
+              <td>{{ entry.verdict_count }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+  </section>
+
+  {% if result %}
+    <section class="panel">
+      <h2>Zerlegte Frage</h2>
+      <p>{{ result.question.display }}</p>
+      {% if result.sender %}
+        <p>Absender aus dem Bestand erkannt: <strong>{{ result.sender[1] }}</strong> (id {{ result.sender[0] }}).</p>
+      {% endif %}
+      {% if result.question.period.stated %}
+        <p>Zeitraum gelesen: {{ result.question.period.label }}.
+          Der Index filtert damit das Aufnahmedatum, nicht das Datum des Dokuments.</p>
+      {% endif %}
+      <table>
+        <thead>
+          <tr>
+            <th>Wort</th>
+            <th>Suchvarianten</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for term in result.question.terms %}
+            <tr>
+              <td>{{ term }}</td>
+              <td>{{ result.question.variants[loop.index0] | join(" · ") }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% if result.notes %}
+        <ul>
+          {% for note in result.notes %}
+            <li>{{ note }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    </section>
+
+    {% if result.totals %}
+      <section class="panel">
+        <h2>Summen</h2>
+        <p>Nur Beträge, die schon dieselbe Rolle und denselben Modifikator haben, werden addiert.</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Dokument</th>
+              <th>Rolle</th>
+              <th>Modifikator</th>
+              <th>Rechnung</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for total in result.totals %}
+              <tr>
+                <td><a class="id-link" href="{{ paperless_url }}/documents/{{ total.document_id }}">#{{ total.document_id }}</a></td>
+                <td>{{ total.role }}</td>
+                <td>{{ total.modifier or "—" }}</td>
+                <td>{{ total.statement }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </section>
+    {% endif %}
+
+    <section class="table-card">
+      <h2>Kandidaten</h2>
+      {% if not result.candidates %}
+        <div class="empty-state">
+          <h2>Kein Dokument getroffen</h2>
+          <p>Die Suchvarianten stehen oben; der Index hat auf keine davon geantwortet.</p>
+        </div>
+      {% else %}
+        {% for candidate in result.candidates %}
+          <section class="panel">
+            <div class="card-top">
+              <h3>
+                <a class="id-link" href="{{ paperless_url }}/documents/{{ candidate.document_id }}">#{{ candidate.document_id }}</a>
+                {{ candidate.title }}
+              </h3>
+              <p class="muted">{{ candidate.correspondent or "—" }} · {{ candidate.created }} · Score {{ candidate.score }}</p>
+            </div>
+            <p>Gefunden über: {{ candidate.matched | join(", ") }}</p>
+
+            {% set document_verdict = verdicts.documents.get(candidate.document_id) %}
+            {% if document_verdict %}
+              <p class="notice">Dein Urteil zu diesem Dokument:
+                <strong>{{ document_verdict.verdict }}</strong> am {{ document_verdict.created_at }}</p>
+            {% else %}
+              <form method="post" action="/evidence/verdict">
+                <input type="hidden" name="q" value="{{ question }}">
+                <input type="hidden" name="question_key" value="{{ question_key }}">
+                <input type="hidden" name="paperless_id" value="{{ candidate.document_id }}">
+                <button class="button secondary" type="submit" name="verdict" value="treffer">richtiges Dokument</button>
+                <button class="button secondary" type="submit" name="verdict" value="nicht-relevant">nicht relevant</button>
+              </form>
+            {% endif %}
+
+            {% if not candidate.lines %}
+              <p>Keine Zeile mit einer Zahl{% if result.question.kinds %} oder einem Wert der gefragten Art{% endif %}.</p>
+            {% else %}
+              <table>
+                <thead>
+                  <tr>
+                    <th>Zeile</th>
+                    <th>Text</th>
+                    <th>Warum gehalten</th>
+                    <th>Beträge</th>
+                    {% if result.question.kinds %}
+                      <th>Art-Werte</th>
+                    {% endif %}
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for line in candidate.lines %}
+                    <tr>
+                      <td>Z{{ line.number }}</td>
+                      <td class="title-cell">{{ line.text }}</td>
+                      <td>{{ line.why }}</td>
+                      <td>
+                        {% if not line.amounts %}
+                          <span class="muted">keine</span>
+                        {% else %}
+                          {% for amount in line.amounts %}
+                            {% set handle = candidate.document_id ~ "|" ~ line.number ~ "|" ~ amount.value %}
+                            {% set answer = verdicts.answers.get(handle) %}
+                            <div>
+                              <strong>{{ amount.value }}</strong>
+                              {{ amount.role or "ohne Rolle" }}{% if amount.modifier %} · {{ amount.modifier }}{% endif %}
+                              <div class="row-subtext">
+                                {% if amount.needle %}Rollenwort: {{ amount.needle }} · {% endif %}
+                                {% if amount.origin %}Rolle aus: {{ amount.origin }}{% endif %}
+                                {% if amount.modifier_origin %} · Modifikator aus: {{ amount.modifier_origin }}{% endif %}
+                              </div>
+                              {% if answer %}
+                                <div class="notice">von dir bestätigt am {{ answer.created_at }}</div>
+                              {% else %}
+                                <form method="post" action="/evidence/verdict">
+                                  <input type="hidden" name="q" value="{{ question }}">
+                                  <input type="hidden" name="question_key" value="{{ question_key }}">
+                                  <input type="hidden" name="paperless_id" value="{{ candidate.document_id }}">
+                                  <input type="hidden" name="line_number" value="{{ line.number }}">
+                                  <input type="hidden" name="amount_value" value="{{ amount.value }}">
+                                  <input type="hidden" name="amount_role" value="{{ amount.role or "" }}">
+                                  <input type="hidden" name="amount_modifier" value="{{ amount.modifier or "" }}">
+                                  <button class="button secondary" type="submit" name="verdict" value="antwort">das ist die Antwort</button>
+                                </form>
+                              {% endif %}
+                            </div>
+                          {% endfor %}
+                        {% endif %}
+                      </td>
+                      {% if result.question.kinds %}
+                        <td>
+                          {% if not line.values %}
+                            <span class="muted">keine</span>
+                          {% else %}
+                            {% for value in line.values %}
+                              {% set handle = candidate.document_id ~ "|" ~ line.number ~ "|" ~ value.value %}
+                              {% set answer = verdicts.answers.get(handle) %}
+                              <div>
+                                <strong>{{ value.value }}</strong>
+                                {{ value.label }}
+                                <div class="row-subtext">
+                                  {% if value.origin %}Wert aus: {{ value.origin }}{% endif %}
+                                  {% if value.competing > 1 %} · {{ value.competing }} Werte dieser Art im Dokument{% endif %}
+                                </div>
+                                {% if answer %}
+                                  <div class="notice">von dir bestätigt am {{ answer.created_at }}</div>
+                                {% else %}
+                                  <form method="post" action="/evidence/verdict">
+                                    <input type="hidden" name="q" value="{{ question }}">
+                                    <input type="hidden" name="question_key" value="{{ question_key }}">
+                                    <input type="hidden" name="paperless_id" value="{{ candidate.document_id }}">
+                                    <input type="hidden" name="line_number" value="{{ line.number }}">
+                                    <input type="hidden" name="amount_value" value="{{ value.value }}">
+                                    <input type="hidden" name="amount_role" value="{{ value.kind }}">
+                                    <input type="hidden" name="amount_modifier" value="">
+                                    <button class="button secondary" type="submit" name="verdict" value="antwort">das ist die Antwort</button>
+                                  </form>
+                                {% endif %}
+                              </div>
+                            {% endfor %}
+                          {% endif %}
+                        </td>
+                      {% endif %}
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            {% endif %}
+
+            {% if candidate.labelled|length > 1 %}
+              <p class="muted">In diesem Dokument stehen mehrere gerollte Beträge nebeneinander:</p>
+              <ul>
+                {% for amount in candidate.labelled %}
+                  <li>{{ amount.value }} — {{ amount.role }}{% if amount.modifier %} ({{ amount.modifier }}){% endif %} <span class="muted">Z{{ amount.line }}</span></li>
+                {% endfor %}
+              </ul>
+            {% endif %}
+          </section>
+        {% endfor %}
+      {% endif %}
+      <p class="table-footer">{{ result.calls_used }} Suchaufrufe, {{ result.candidates | length }} Dokumente geöffnet.</p>
+      {% if verdicts.documents or verdicts.answers %}
+        <p class="muted">{{ confirmed_note }}</p>
+      {% endif %}
+      <p class="row-subtext">Merksatz dieser Frage: {{ question_key }}.
+        Ein Urteil wird nur unter diesem Satz wiederangeboten – andere Wörter ergeben eine andere Frage.</p>
+    </section>
+
+    <section class="panel">
+      <h2>Versuche</h2>
+      <p>Jede Zeile ist ein Aufruf beim Index, mit der Zahl, die er zurückgab.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Stufe</th>
+            <th>Wort</th>
+            <th>Variante</th>
+            <th>Treffer</th>
+            <th>Absender</th>
+            <th>Zeitraum</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for attempt in result.attempts %}
+            <tr>
+              <td>{{ attempt.stage }}</td>
+              <td>{{ attempt.term }}</td>
+              <td>{{ attempt.variant }}</td>
+              <td>{{ attempt.hits }}</td>
+              <td>{{ attempt.sender or "—" }}</td>
+              <td>{{ attempt.period or "—" }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  {% endif %}
+</div>
+{% endblock %}

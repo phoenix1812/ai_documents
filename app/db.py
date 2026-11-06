@@ -9,6 +9,8 @@ Supports:
 - review-learning log
 - exact duplicate detection by PDF hash
 - probable duplicate detection by normalized OCR hash
+- search history of the question layer
+- reader judgements about the answers the question layer showed
 """
 
 from __future__ import annotations
@@ -65,6 +67,25 @@ APPROVED_STATUSES = (
     STATUS_AUTO_APPROVED,
     STATUS_MANUALLY_APPROVED,
 )
+
+# The question layer remembers what was asked. A cap keeps the table small
+# without needing a scheduled job: every insert drops what fell off the end.
+SEARCH_HISTORY_LIMIT = 200
+
+# What a reader of the evidence page can say about an answer. The closed set is
+# the point: a judgement that is not one of these three is a bug, not a nuance.
+# "treffer" and "antwort" judge different things - the first whether this
+# document was the one to open, the second whether this figure in this line is
+# what was asked for - so both exist on their own.
+VERDICT_HIT = "treffer"
+VERDICT_IRRELEVANT = "nicht-relevant"
+VERDICT_ANSWER = "antwort"
+
+EVIDENCE_VERDICTS = (VERDICT_HIT, VERDICT_IRRELEVANT, VERDICT_ANSWER)
+
+# The judgements that mean "this was right". A question with only
+# VERDICT_IRRELEVANT rows has been ruled down, not answered.
+CONFIRMING_VERDICTS = (VERDICT_HIT, VERDICT_ANSWER)
 
 # Reconciliation only looks at this set. Failures belong here on purpose: the
 # queue already retried them within QUEUE_MAX_ATTEMPTS, and periodic
@@ -205,6 +226,7 @@ class Database:
             ("paperless_url", "TEXT"),
             ("subject", "TEXT"),
             ("document_date", "TEXT"),
+            ("due_date", "TEXT"),
             ("retry_count", "INTEGER DEFAULT 0"),
             ("last_retry_at", "TEXT"),
         ):
@@ -233,6 +255,46 @@ class Database:
 
         self.conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS search_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                query TEXT NOT NULL,
+                variants TEXT DEFAULT '[]',
+                hits INTEGER DEFAULT 0,
+                candidates INTEGER DEFAULT 0,
+                question_key TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        self._add_column_if_missing(
+            "search_history", "question_key", "TEXT NOT NULL DEFAULT ''"
+        )
+
+        # Judgements live apart from the history on purpose: the history is a
+        # ring buffer that throws rows away at SEARCH_HISTORY_LIMIT, and a
+        # judgement must not be swept by a question asked later. line_number and
+        # amount_value default to 0 and '' so a document-level judgement and a
+        # figure-level one can share one unique key - SQLite treats NULLs in a
+        # UNIQUE index as distinct, which would pile up rows on every re-click.
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS evidence_verdicts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                question_key TEXT NOT NULL,
+                paperless_id INTEGER NOT NULL,
+                line_number INTEGER NOT NULL DEFAULT 0,
+                amount_value TEXT NOT NULL DEFAULT '',
+                amount_role TEXT,
+                amount_modifier TEXT,
+                verdict TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE (question_key, paperless_id, line_number, amount_value)
+            )
+            """
+        )
+
+        self.conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS app_meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
@@ -249,6 +311,7 @@ class Database:
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_status ON documents (status)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_processed_at ON documents (processed_at)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_review_decisions_paperless_id ON review_decisions (paperless_id)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_search_history_created_at ON search_history (created_at)")
         self.conn.commit()
 
     @staticmethod
@@ -375,6 +438,7 @@ class Database:
         duplicate_reason: str | None = None,
         subject: str | None = None,
         document_date: str | None = None,
+        due_date: str | None = None,
     ) -> None:
         now = self._now()
         self.conn.execute(
@@ -390,6 +454,7 @@ class Database:
                 document_type,
                 subject,
                 document_date,
+                due_date,
                 tags,
                 confidence,
                 reason,
@@ -403,7 +468,7 @@ class Database:
                 created_at,
                 processed_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 COALESCE((SELECT retry_count FROM documents WHERE file_hash = ?), 0),
                 ?, ?)
             """,
@@ -418,6 +483,7 @@ class Database:
                 document_type,
                 subject,
                 document_date,
+                due_date,
                 self._json_list(tags),
                 confidence,
                 reason,
@@ -685,6 +751,149 @@ class Database:
             (limit,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def record_search(
+        self,
+        query: str,
+        variants: list[str] | None,
+        hits: int,
+        candidates: int,
+        question_key: str,
+    ) -> None:
+        """Remember one asked question: what it was split into and what came back.
+
+        The variants are what the index was actually searched with, so a later
+        read of the history shows which term was the one that found nothing.
+        The key is what the same question is filed under a second later, in
+        whatever words it was phrased then; it is the only handle a judgement
+        has back to its question.
+        """
+
+        text = (query or "").strip()
+        if not text:
+            return
+
+        self.conn.execute(
+            """
+            INSERT INTO search_history (
+                query, variants, hits, candidates, question_key, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                text,
+                self._json_list(variants),
+                int(hits),
+                int(candidates),
+                question_key,
+                self._now(),
+            ),
+        )
+        self.conn.execute(
+            """
+            DELETE FROM search_history
+            WHERE id NOT IN (
+                SELECT id FROM search_history
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+            )
+            """,
+            (SEARCH_HISTORY_LIMIT,),
+        )
+        self.conn.commit()
+
+    def recent_searches(self, limit: int = 10) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM search_history
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        history = [dict(row) for row in rows]
+        for entry in history:
+            entry["variants"] = self.parse_json_list(entry.get("variants"))
+        return history
+
+    def record_verdict(
+        self,
+        question_key: str,
+        paperless_id: int,
+        verdict: str,
+        line_number: int = 0,
+        amount_value: str = "",
+        amount_role: str | None = None,
+        amount_modifier: str | None = None,
+    ) -> None:
+        """Store what the reader said about one answer, overwriting the earlier
+        statement about the same figure.
+
+        A re-click is the normal case, not an accident: the second judgement is
+        the current one, so the row is replaced and its timestamp moves.
+        """
+
+        if not question_key.strip():
+            raise ValueError("A verdict needs the question it judges")
+        if verdict not in EVIDENCE_VERDICTS:
+            raise ValueError(f"Unknown verdict: {verdict}")
+
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO evidence_verdicts (
+                question_key, paperless_id, line_number, amount_value,
+                amount_role, amount_modifier, verdict, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                question_key,
+                int(paperless_id),
+                int(line_number),
+                amount_value,
+                amount_role,
+                amount_modifier,
+                verdict,
+                self._now(),
+            ),
+        )
+        self.conn.commit()
+
+    def verdicts_for_key(self, question_key: str) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM evidence_verdicts
+            WHERE question_key = ?
+            ORDER BY paperless_id, line_number
+            """,
+            (question_key,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def confirming_verdict_counts(self, question_keys: list[str]) -> dict[str, int]:
+        """How often each of these questions was already answered to.
+
+        Only the confirming judgements count. A question full of
+        "nicht-relevant" rows has been ruled down, and showing that as an
+        answer would say the opposite of what the reader meant.
+        """
+
+        keys = [key for key in question_keys if key]
+        if not keys:
+            return {}
+
+        placeholders = ", ".join("?" for _ in keys)
+        rows = self.conn.execute(
+            f"""
+            SELECT question_key, COUNT(*) AS total
+            FROM evidence_verdicts
+            WHERE question_key IN ({placeholders})
+              AND verdict IN ({", ".join("?" for _ in CONFIRMING_VERDICTS)})
+            GROUP BY question_key
+            """,
+            [*keys, *CONFIRMING_VERDICTS],
+        ).fetchall()
+        return {str(row["question_key"]): int(row["total"]) for row in rows}
 
     def insert_review_decision(
         self,
